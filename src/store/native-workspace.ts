@@ -20,10 +20,10 @@ export function openNativeSession(signal: AbortSignal) {
   let closed: Error | undefined;
   const close = () => {
     signal.removeEventListener('abort', abort);
-    port.disconnect();
     closed ??= new Error('The Windows session was closed.');
     waiting?.reject(closed);
     waiting = undefined;
+    port.disconnect();
   };
   const abort = () => {
     waiting?.reject(signal.reason);
@@ -37,8 +37,8 @@ export function openNativeSession(signal: AbortSignal) {
   port.onMessage.addListener((message: NativeResponse<unknown>) => {
     const current = waiting;
     waiting = undefined;
-    if (message.error || !('data' in message))
-      current?.reject(new Error(message.error ?? 'Respuesta inválida de Windows.'));
+    if (!message || typeof message !== 'object' || message.error || !('data' in message))
+      current?.reject(new Error(message?.error ?? 'Respuesta inválida de Windows.'));
     else current?.resolve(message.data);
   });
   return {

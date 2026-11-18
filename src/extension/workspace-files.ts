@@ -4,8 +4,7 @@ import type { FolderMode, WorkspaceDirectory } from '@src/store/workspace';
 import { base64 } from '@src/agent/attachments';
 import { checkSave, SAVE_TYPES } from '@src/agent/save-file';
 
-const PAGE_SIZE = 25;
-const SCAN_LIMIT = 10_000;
+const PAGE_SIZE = 10;
 
 export function pathParts(input: unknown, rootAllowed: boolean): string[] {
   if ((input === '' || input === undefined) && rootAllowed) return [];
@@ -63,11 +62,11 @@ export async function browseFiles(args: Record<string, unknown>, signal: AbortSi
   const query = typeof args.query === 'string' ? args.query.slice(0, 200).toLowerCase() : '';
   const offset = offsetOf(args.offset);
   const entries = [];
-  let scanned = 0;
   let matched = 0;
+  const deadline = performance.now() + 8000;
   for await (const entry of folder.values()) {
     signal.throwIfAborted();
-    if (++scanned > SCAN_LIMIT) return { entries, limited: true };
+    if (performance.now() > deadline) return { entries, limited: true };
     if (entry.name.startsWith('.') || !entry.name.toLowerCase().includes(query)) continue;
     if (matched++ < offset) continue;
     if (entries.length >= PAGE_SIZE) return { entries, nextOffset: offset + entries.length };
@@ -122,7 +121,8 @@ export async function saveWorkspaceFile(args: Record<string, unknown>, signal: A
   const parts = pathParts(args.path, false);
   const filename = parts.pop()!;
   const dot = filename.lastIndexOf('.');
-  const mimeType = dot > 0 ? SAVE_TYPES[filename.slice(dot + 1).toLowerCase()] : undefined;
+  const extension = filename.slice(dot + 1).toLowerCase();
+  const mimeType = dot > 0 ? SAVE_TYPES[extension === 'htm' ? 'html' : extension] : undefined;
   const checked = checkSave({ filename, content: args.content, mimeType });
   if (!checked.ok) throw new Error(checked.reason);
   return writeNewWorkspaceFile(args.folderId, parts, filename, new Blob([args.content as string]), signal);

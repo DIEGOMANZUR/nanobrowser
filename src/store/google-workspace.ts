@@ -70,6 +70,26 @@ function str(args: Record<string, unknown>, key: string, limit = 500, required =
 
 const fileFields = 'id,name,mimeType,modifiedTime,size,webViewLink,parents';
 
+const encodeText = (value: string) => encodeBase64(new TextEncoder().encode(value));
+
+function subjectHeader(subject: string): string {
+  const words: string[] = [];
+  let buffer = '';
+  let bytes = 0;
+  for (const char of subject) {
+    const size = new TextEncoder().encode(char).length;
+    if (bytes + size > 42) {
+      words.push('=?UTF-8?B?' + encodeText(buffer) + '?=');
+      buffer = '';
+      bytes = 0;
+    }
+    buffer += char;
+    bytes += size;
+  }
+  words.push('=?UTF-8?B?' + encodeText(buffer) + '?=');
+  return words.join('\r\n ');
+}
+
 export async function googleCall(
   connector: Connector,
   tool: string,
@@ -90,16 +110,29 @@ export async function googleCall(
   let path = '';
   let body: string | undefined;
   const query = new URLSearchParams();
-  const pageToken = str(args, 'pageToken', 1000, false);
-  if (pageToken) query.set('pageToken', pageToken);
-  const q = str(args, 'q', 500, false);
-  if (q) query.set('q', q);
-  const id = () => encodeURIComponent(str(args, 'id'));
-  const calendar = () => encodeURIComponent(str(args, 'calendar', 500, false) || 'primary');
+  const filter = (key: string, limit = 500) => {
+    const value = str(args, key, limit, false);
+    if (value) query.set(key, value);
+  };
+  const segment = (value: string) => {
+    if (
+      value === '.' ||
+      value === '..' ||
+      value.includes('/') ||
+      value.includes('\\') ||
+      [...value].some(char => char.charCodeAt(0) < 32)
+    )
+      throw new Error('Invalid Google resource identifier.');
+    return encodeURIComponent(value);
+  };
+  const id = () => segment(str(args, 'id'));
+  const calendar = () => segment(str(args, 'calendar', 500, false) || 'primary');
   switch (tool) {
     case 'list_messages':
       path = '/gmail/v1/users/me/messages';
       query.set('maxResults', '20');
+      filter('q');
+      filter('pageToken', 1000);
       break;
     case 'get_message':
       path = '/gmail/v1/users/me/messages/' + id();
@@ -111,44 +144,52 @@ export async function googleCall(
       path = '/gmail/v1/users/me/messages/send';
       const to = str(args, 'to', 254);
       const subject = str(args, 'subject', 160);
-      if (!/^[^\s@<>;,\r\n]+@[^\s@<>;,\r\n]+\.[^\s@<>;,\r\n]+$/.test(to) || /[\r\n]/.test(subject)) {
+      if (
+        !/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(
+          to,
+        ) ||
+        [...subject].some(char => char.charCodeAt(0) < 32)
+      ) {
         throw new Error('Use a single recipient and a one-line subject.');
       }
-      const encode = (text: string) => encodeBase64(new TextEncoder().encode(text));
-      const encodedSubject = encode(subject);
-      const content = encode(str(args, 'body', 20_000))
+      const content = encodeText(str(args, 'body', 20_000).replace(/\r\n|\r|\n/g, '\r\n'))
         .match(/.{1,76}/g)
         ?.join('\r\n');
       const message = [
         'To: ' + to,
-        'Subject: =?UTF-8?B?' + encodedSubject + '?=',
+        'Subject: ' + subjectHeader(subject),
         'MIME-Version: 1.0',
         'Content-Type: text/plain; charset=UTF-8',
         'Content-Transfer-Encoding: base64',
         '',
         content,
+        '',
       ].join('\r\n');
       body = JSON.stringify({
-        raw: encode(message).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, ''),
+        raw: encodeText(message).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, ''),
       });
       break;
     }
     case 'list_calendars':
       path = '/calendar/v3/users/me/calendarList';
       query.set('maxResults', '20');
+      query.set('fields', 'nextPageToken,items(id,summary,timeZone,primary,accessRole)');
+      filter('pageToken', 1000);
       break;
     case 'list_events':
       path = '/calendar/v3/calendars/' + calendar() + '/events';
       query.set('maxResults', '15');
       query.set('singleEvents', 'true');
       query.set('orderBy', 'startTime');
-      for (const key of ['timeMin', 'timeMax']) {
-        const value = str(args, key, 50, false);
-        if (value) query.set(key, value);
-      }
+      query.set('fields', 'nextPageToken,items(id,summary,start,end,status,location,htmlLink)');
+      filter('q');
+      filter('pageToken', 1000);
+      filter('timeMin', 50);
+      filter('timeMax', 50);
       break;
     case 'create_event': {
       path = '/calendar/v3/calendars/' + calendar() + '/events';
+      query.set('fields', 'id,summary,start,end,status,htmlLink');
       const start = str(args, 'start', 50);
       const end = str(args, 'end', 50);
       if (
@@ -166,12 +207,15 @@ export async function googleCall(
       });
       break;
     }
-    case 'list_files':
+    case 'list_files': {
       path = '/drive/v3/files';
       query.set('pageSize', '20');
       query.set('fields', 'nextPageToken,files(' + fileFields + ')');
+      const q = str(args, 'q', 500, false);
       query.set('q', q ? '(' + q + ') and trashed = false' : 'trashed = false');
+      filter('pageToken', 1000);
       break;
+    }
     case 'get_file_metadata':
       path = '/drive/v3/files/' + id();
       query.set('fields', fileFields);
@@ -201,8 +245,7 @@ export async function googleCall(
     }
   }
   if (body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  const host =
-    kind === 'gmail' ? 'gmail.googleapis.com' : kind === 'calendar' ? 'www.googleapis.com' : 'www.googleapis.com';
+  const host = kind === 'gmail' ? 'gmail.googleapis.com' : 'www.googleapis.com';
   const response = await fetch('https://' + host + path + (query.size ? '?' + query : ''), {
     headers,
     method: body ? 'POST' : 'GET',

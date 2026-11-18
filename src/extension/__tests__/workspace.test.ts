@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { actionDecision } from '../workspace-actions';
+import { actionDecision, fileAction } from '../workspace-actions';
 import { pathParts } from '../workspace-files';
 import { connectorEndpoint, withConnector } from '@src/store/mcp';
 import { googleCall } from '@src/store/google-workspace';
-import { DEFAULT_WORKSPACE_POLICY } from '@src/store/workspace';
+import { DEFAULT_WORKSPACE_POLICY, WORKSPACE_POLICY_KEY, patchWorkspacePolicy } from '@src/store/workspace';
 import type { Connector } from '@src/store/workspace';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -30,14 +30,52 @@ describe('Workspace permissions', () => {
     const request = { category: 'upload', site: 'example.com', tabId: 1 } as const;
     expect(actionDecision({ ...DEFAULT_WORKSPACE_POLICY, actions: 'send' }, request, old).decision).toBe('ask');
     expect(
+      actionDecision(
+        { ...DEFAULT_WORKSPACE_POLICY, actions: 'send' },
+        { ...request, category: 'submit', target: 'Continue' },
+        old,
+      ).decision,
+    ).toBe('ask');
+    expect(
       actionDecision({ ...DEFAULT_WORKSPACE_POLICY, actions: 'groups', transfers: false }, request, old).decision,
     ).toBe('run');
+  });
+
+  it('asks before a local write in a chat set to ask and serializes independent settings changes', async () => {
+    let saved = { [WORKSPACE_POLICY_KEY]: { ...DEFAULT_WORKSPACE_POLICY, access: 'full' } };
+    const native = vi.fn();
+    vi.stubGlobal('chrome', {
+      runtime: { connectNative: native },
+      storage: {
+        local: {
+          get: async () => structuredClone(saved),
+          set: async (patch: typeof saved) => {
+            saved = patch;
+          },
+        },
+      },
+    });
+    const approval = vi.fn().mockResolvedValue(false);
+    await expect(
+      fileAction(
+        'save_workspace_file',
+        { folderId: 'windows', path: 'C:/Test/copy.txt', content: 'test' },
+        approval,
+        text => text,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('declined');
+    expect(approval).toHaveBeenCalledTimes(1);
+    expect(native).not.toHaveBeenCalled();
+    await Promise.all([patchWorkspacePolicy({ access: 'folders' }), patchWorkspacePolicy({ unlimited: true })]);
+    expect(saved[WORKSPACE_POLICY_KEY]).toMatchObject({ access: 'folders', unlimited: true });
   });
 });
 
 describe('Workspace connectors', () => {
   it('negotiates a session, discovers safe tools and reads a streamed result', async () => {
     const mock = vi.fn(async (_: string, options: RequestInit) => {
+      if (options.method === 'DELETE') return new Response(null, { status: 204 });
       const request = JSON.parse(String(options.body));
       const result = (data: unknown) => ({ jsonrpc: '2.0', id: request.id, result: data });
       if (request.method === 'initialize')
@@ -72,6 +110,38 @@ describe('Workspace connectors', () => {
       },
     );
     expect(output).toEqual([{ type: 'text', text: 'report' }]);
+    expect(mock.mock.calls.at(-1)?.[1].method).toBe('DELETE');
+  });
+
+  it('uses only the catalogued read-only tools in a generic connector', async () => {
+    const mock = vi.fn(async (_: string, options: RequestInit) => {
+      const request = JSON.parse(String(options.body));
+      if (request.method === 'notifications/initialized') return new Response(null, { status: 202 });
+      return Response.json({
+        jsonrpc: '2.0',
+        id: request.id,
+        result:
+          request.method === 'initialize'
+            ? { protocolVersion: '2025-06-18' }
+            : {
+                tools: [
+                  { name: 'read_record', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+                  { name: 'create_record', inputSchema: { type: 'object' }, annotations: { destructiveHint: false } },
+                ],
+              },
+      });
+    });
+    vi.stubGlobal('fetch', mock);
+    await withConnector(
+      { endpoint: 'https://example.com/mcp', token: '' },
+      new AbortController().signal,
+      async client => {
+        const tools = await client.list();
+        expect(tools.map(tool => tool.name)).toEqual(['read_record']);
+        await expect(client.call('create_record', {})).rejects.toThrow('unavailable');
+      },
+    );
+    expect(mock.mock.calls).toHaveLength(3);
   });
 
   it('prepares new mail for Google and refuses a delete operation', async () => {

@@ -9,6 +9,7 @@ import type { OpenPrompt, PanelEventBody } from '@src/ui/protocol';
 interface Waiting {
   prompt: OpenPrompt;
   resolve: (answer: unknown) => void;
+  detachAbort: () => void;
   /** Says why an answer cannot be taken yet (a prompt dialog still open), or null. */
   check?: (answer: unknown) => Promise<string | null>;
 }
@@ -52,12 +53,18 @@ export class PromptBroker {
     };
     return new Promise(resolve => {
       if (signal.aborted) return resolve('withdrawn');
-      this.#open.set(prompt.id, { prompt, resolve: a => resolve(a as T), check: options.check });
+      const abort = () => {
+        if (this.#close(prompt.id, 'withdrawn')) resolve('withdrawn');
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      this.#open.set(prompt.id, {
+        prompt,
+        resolve: a => resolve(a as T),
+        check: options.check,
+        detachAbort: () => signal.removeEventListener('abort', abort),
+      });
       this.hooks.emit(conversationId, { type: 'prompt_open', prompt });
       this.hooks.waiting(conversationId, this.promptsOf(conversationId));
-      signal.addEventListener('abort', () => {
-        if (this.#close(prompt.id, 'withdrawn')) resolve('withdrawn');
-      });
     });
   }
 
@@ -88,6 +95,7 @@ export class PromptBroker {
     const waiting = this.#open.get(promptId);
     if (!waiting) return false;
     this.#open.delete(promptId);
+    waiting.detachAbort();
     const conversationId = waiting.prompt.conversationId;
     this.hooks.emit(conversationId, { type: 'prompt_closed', id: promptId, outcome });
     this.hooks.waiting(conversationId, this.promptsOf(conversationId));

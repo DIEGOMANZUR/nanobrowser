@@ -10,6 +10,8 @@ import { setUninstallPage } from './uninstall';
 import { openWhatsNew } from '@src/store/whats-new';
 import { WHATS_NEW, releaseOf } from '@src/ui/whats-new';
 import { DATA_REQUEST } from '@src/ui/protocol';
+import { patchWorkspacePolicy, WORKSPACE_POLICY_REQUEST } from '@src/store/workspace';
+import type { WorkspacePolicy } from '@src/store/workspace';
 
 export const runManager = new RunManager();
 listenForPanels(runManager);
@@ -35,8 +37,17 @@ chrome.runtime.onInstalled.addListener(details => {
 });
 // Settings → Data → Delete everything goes through the RunManager, which stops running tasks first.
 chrome.runtime.onMessage.addListener((message: unknown, sender, reply) => {
-  const m = message as { type?: string; op?: 'delete-all' };
-  if (m?.type !== DATA_REQUEST || sender.id !== chrome.runtime.id) return;
+  const m = message as { type?: string; op?: 'delete-all'; patch?: Partial<WorkspacePolicy> };
+  if (sender.id !== chrome.runtime.id || sender.url?.split(/[?#]/, 1)[0] !== chrome.runtime.getURL('options.html'))
+    return;
+  if (m?.type === WORKSPACE_POLICY_REQUEST && m.patch) {
+    patchWorkspacePolicy(m.patch).then(
+      policy => reply({ policy }),
+      () => reply({ error: 'No se pudieron guardar los permisos.' }),
+    );
+    return true;
+  }
+  if (m?.type !== DATA_REQUEST) return;
   const done = m.op === 'delete-all' ? runManager.deleteAll() : Promise.reject(new Error('unknown request'));
   done.then(
     () => reply({ ok: true }),

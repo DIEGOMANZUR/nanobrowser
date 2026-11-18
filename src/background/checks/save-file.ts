@@ -102,7 +102,22 @@ defineCheck({
       }
       const image = await chrome.tabs.captureVisibleTab(view.windowId, { format: 'png' });
       await panel(id, 'click', { label: 'Save' });
-      const ask = await waitForText(id, 'Saved the prices.');
+      const ask = await waitForText(id, 'Saved the prices.').catch(async error => {
+        const downloads = await Promise.all(
+          saved.map(async id => {
+            const [item] = await chrome.downloads.search({ id });
+            return { state: item?.state, error: item?.error, danger: item?.danger, bytes: item?.bytesReceived };
+          }),
+        );
+        const offscreen = (
+          await chrome.runtime.getContexts({ contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT] })
+        ).length;
+        throw new Error(
+          String(error) +
+            '\nDownload diagnostics: ' +
+            JSON.stringify({ downloadCount: saved.length, downloads, offscreen }),
+        );
+      });
       // Auto mode: no card; the same name again gets a number.
       await panel(id, 'select', { label: 'Mode', value: 'auto' }).catch(() => undefined);
       await scriptReplies([save('nb-check-prices.csv'), { text: 'Saved again.' }]);

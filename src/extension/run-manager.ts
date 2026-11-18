@@ -19,6 +19,7 @@ import {
   listRuns,
   newId,
   putRun,
+  recordWorkspaceProgress,
   setLeaf,
   getBlob,
   listBlobs,
@@ -49,7 +50,7 @@ import { PageBorder, injectBorder, listenForBorder } from './border';
 import { addPromptRoute, controllerReady } from './layer';
 import { Permissions } from './permissions';
 import { PromptBroker } from './prompt-broker';
-import { notifyFinished, notifyNeeds, notifyProgress } from './notify';
+import { clearNotification, notifyFinished, notifyNeeds, notifyProgress } from './notify';
 import { thumbnail } from './thumbnail';
 import { isNumberedCopy, saveText } from './downloads';
 import { checkSave } from '@src/agent/save-file';
@@ -68,7 +69,7 @@ import { livePair, ModelUnavailable, resolveModel } from './models';
 import { count, deleteKeepingChoices, noteActivity, observe, runEnded, runModel, runStarted } from './analytics';
 import { endOf } from './analytics-payload';
 import { CONNECTOR_TOOLS, WORKSPACE_TOOLS } from '@src/agent/workspace-tools';
-import { workspacePolicy } from '@src/store/workspace';
+import { workspace, workspacePolicy, WORKSPACE_POLICY_KEY } from '@src/store/workspace';
 import { actionDecision, fileAction, resolveWorkspaceUpload } from './workspace-actions';
 import { connectorAction } from './connectors';
 
@@ -741,6 +742,8 @@ export class RunManager {
     await deleteKeepingChoices(async () => {
       for (const c of await listConversations()) await this.#delete(c.id, false);
       await deleteEverything();
+      await workspace.clear();
+      if (chrome.runtime.getManifest().oauth2?.client_id) await chrome.identity?.clearAllCachedAuthTokens();
       await clearShortcuts();
       // The old conversations go first: with them still there and the upgrade record gone, a worker start in between
       // would run the move again.
@@ -750,6 +753,7 @@ export class RunManager {
         'nb.providers',
         'nb.keys',
         'nb.siteRules',
+        WORKSPACE_POLICY_KEY,
         UPGRADE_KEY,
         WHATS_NEW_KEY,
         RATING_KEY,
@@ -1021,9 +1025,23 @@ export class RunManager {
         this.#approveWorkspace(conversationId, title, detail, requestSignal);
       try {
         if (WORKSPACE_TOOLS.some(t => t.name === call.toolName))
-          return await fileAction(call.toolName, args, approve, wrap, signal);
+          return await fileAction(
+            call.toolName,
+            args,
+            approve,
+            wrap,
+            signal,
+            () => (this.#modes.get(conversationId) ?? 'ask') === 'ask',
+          );
         if (CONNECTOR_TOOLS.some(t => t.name === call.toolName))
-          return await connectorAction(call.toolName, args, approve, wrap, signal);
+          return await connectorAction(
+            call.toolName,
+            args,
+            approve,
+            wrap,
+            signal,
+            () => (this.#modes.get(conversationId) ?? 'ask') === 'ask',
+          );
       } catch (error) {
         return {
           text: 'Workspace error: ' + wrap(String(error).slice(0, 400), { attachment: 'workspace error' }),
@@ -1065,12 +1083,13 @@ export class RunManager {
         isError: true,
       };
     }
-    const saved = await saveText({ filename: check.filename, content, mimeType: check.mimeType }, saveAs).catch(
+    signal.throwIfAborted();
+    const saved = await saveText({ filename: check.filename, content, mimeType: check.mimeType }, saveAs, signal).catch(
       (error: Error) => ({ state: 'interrupted' as const, error: error.message, name: check.filename, downloadId: -1 }),
     );
     if (saved.state !== 'complete') {
       return {
-        text: `error SAVE_FAILED (not saved)\nThe download did not complete: ${saved.error ?? 'interrupted'}.`,
+        text: `error SAVE_FAILED (completion unverified)\nThe download did not confirm completion. ${saved.error ?? 'Chrome reported an interruption.'}`,
         isError: true,
       };
     }
@@ -1369,7 +1388,7 @@ export class RunManager {
                 const completedActions = (record.workspaceActions =
                   (record.workspaceActions ?? restore?.workspaceActions ?? 0) + 1);
                 if (completedActions % 100 !== 0) return;
-                await putRun(record);
+                await recordWorkspaceProgress(conversationId, runId, completedActions);
                 const milestone = 'Tarea en curso · ' + completedActions + ' pasos registrados.';
                 await this.#notice(conversationId, milestone, 'info');
                 await notifyProgress(conversationId, completedActions, (await this.scope.tabsOf(conversationId))[0]);
@@ -1409,6 +1428,7 @@ export class RunManager {
         record.outcome = 'failed';
         await this.#setStatus(record, 'failed', message);
       } finally {
+        clearNotification('progress-' + conversationId);
         runEnded(record, end ?? {});
         // A run that finished well counts towards the card that asks for a store rating.
         if (endOf(record.status, record.outcome) === 'success') {

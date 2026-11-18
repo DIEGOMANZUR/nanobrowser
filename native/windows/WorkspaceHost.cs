@@ -4,7 +4,10 @@ using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Diagnostics;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
+using Microsoft.Win32.SafeHandles;
 
 internal static class WorkspaceHost
 {
@@ -13,6 +16,14 @@ internal static class WorkspaceHost
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
     private static Process server;
     private static string serverId;
+    private static readonly string HostDirectory = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory).TrimEnd('\\');
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr attributes,
+        uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder path, uint count, uint flags);
 
     private static void Main()
     {
@@ -38,7 +49,8 @@ internal static class WorkspaceHost
                     response = new { error = error is UnauthorizedAccessException ? "Windows denied access to this path." : error.Message };
                 }
                 var payload = Encoding.UTF8.GetBytes(Json.Serialize(response));
-                if (payload.Length > 1024 * 1024) return;
+                if (payload.Length > 1024 * 1024)
+                    payload = Encoding.UTF8.GetBytes("{\"error\":\"The Windows response is too large.\"}");
                 output.Write(payload.Length);
                 output.Write(payload);
                 output.Flush();
@@ -54,7 +66,7 @@ internal static class WorkspaceHost
             case "roots": return Roots();
             case "list": return Browse(PathArg(request), StringArg(request, "query"), NumberArg(request, "offset"));
             case "chunk": return ReadChunk(PathArg(request), NumberArg(request, "offset"));
-            case "save": return Save(PathArg(request), StringArg(request, "content"));
+            case "save": return Save(PathArg(request), RequiredString(request, "content"));
             case "copy": return Copy(PathArg(request, "source"), PathArg(request));
             case "mcp": return Exchange(StringArg(request, "server"), StringArg(request, "message"));
             case "mcp-close": CloseServer(); return true;
@@ -115,22 +127,45 @@ internal static class WorkspaceHost
         server.StandardInput.Flush();
         object requestId;
         if (!request.TryGetValue("id", out requestId)) return null;
-        while (true)
+        var deadline = Stopwatch.StartNew();
+        for (var skipped = 0; skipped < 100; skipped++)
         {
-            var line = server.StandardOutput.ReadLineAsync();
-            if (!line.Wait(15000)) { CloseServer(); throw new TimeoutException("The local connector timed out."); }
+            var line = ReadServerLine(server.StandardOutput);
+            var remaining = 15000 - (int)deadline.ElapsedMilliseconds;
+            if (remaining <= 0 || !line.Wait(remaining)) { CloseServer(); throw new TimeoutException("The local connector timed out."); }
             if (line.Result == null) throw new IOException("The local connector closed the output stream.");
-            if (line.Result.Length > 250000) throw new IOException("The local connector response is too large.");
             var reply = Json.Deserialize<Dictionary<string, object>>(line.Result);
             object replyId;
             if (reply.TryGetValue("id", out replyId) && Object.Equals(replyId, requestId)) return reply;
         }
+        throw new IOException("The local connector did not return a matching response.");
+    }
+
+    private static async System.Threading.Tasks.Task<string> ReadServerLine(StreamReader reader)
+    {
+        // Bound the line while reading so a faulty server cannot allocate an unbounded string.
+        var line = new StringBuilder();
+        var character = new char[1];
+        while (await reader.ReadAsync(character, 0, 1) > 0)
+        {
+            if (character[0] == '\n') return line.ToString();
+            if (line.Length >= 250000) throw new IOException("The local connector response is too large.");
+            line.Append(character[0]);
+        }
+        return null;
     }
 
     private static string StringArg(Dictionary<string, object> request, string key)
     {
         object value;
         return request.TryGetValue(key, out value) ? value as string ?? "" : "";
+    }
+
+    private static string RequiredString(Dictionary<string, object> request, string key)
+    {
+        object value;
+        if (!request.TryGetValue(key, out value) || !(value is string)) throw new ArgumentException("Expected text for " + key + ".");
+        return (string)value;
     }
 
     private static int NumberArg(Dictionary<string, object> request, string key)
@@ -141,7 +176,7 @@ internal static class WorkspaceHost
 
     private static string PathArg(Dictionary<string, object> request, string key = "path")
     {
-        var path = StringArg(request, key).Replace('/', '\\');
+        var path = RequiredString(request, key).Replace('/', '\\');
         if (path.Length > 245 || !Regex.IsMatch(path, @"^[a-zA-Z]:\\"))
             throw new ArgumentException("Use an absolute path on a Windows drive.");
         foreach (var part in path.Substring(3).Split('\\'))
@@ -153,6 +188,46 @@ internal static class WorkspaceHost
                 throw new ArgumentException("This Windows path contains a reserved name or an invalid segment.");
         }
         return Path.GetFullPath(path);
+    }
+
+    private static void CheckWorkspacePath(string path)
+    {
+        if (WithinHost(path, HostDirectory)) throw new UnauthorizedAccessException("The companion's configuration folder is private.");
+        var ancestor = path;
+        while (!Directory.Exists(ancestor) && !File.Exists(ancestor))
+        {
+            ancestor = Path.GetDirectoryName(ancestor);
+            if (String.IsNullOrEmpty(ancestor)) throw new DirectoryNotFoundException("No accessible parent directory.");
+        }
+        using (var handle = CreateFile(ancestor, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) throw new UnauthorizedAccessException("Windows could not verify this path.");
+            CheckOpenedPath(handle, ancestor);
+        }
+    }
+
+    private static string FinalPath(SafeFileHandle handle)
+    {
+        var result = new StringBuilder(32768);
+        var size = GetFinalPathNameByHandle(handle, result, (uint)result.Capacity, 0);
+        if (size <= 0 || size >= result.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error());
+        var final = result.ToString();
+        if (final.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + final.Substring(8);
+        return final.StartsWith(@"\\?\", StringComparison.Ordinal) ? final.Substring(4) : final;
+    }
+
+    private static bool WithinHost(string path, string root)
+    {
+        return path.Equals(root, StringComparison.OrdinalIgnoreCase) || path.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void CheckOpenedPath(SafeFileHandle handle, string requested)
+    {
+        var final = FinalPath(handle).TrimEnd('\\');
+        if (WithinHost(final, HostDirectory))
+            throw new UnauthorizedAccessException("The companion's configuration folder is private.");
+        if (!final.Equals(requested.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Use the directory's direct Windows path.");
     }
 
     private static IList<object> Roots()
@@ -170,14 +245,15 @@ internal static class WorkspaceHost
 
     private static object Browse(string path, string query, int offset)
     {
+        CheckWorkspacePath(path);
         var entries = new List<object>();
         var count = 0;
-        var scanned = 0;
+        var deadline = Stopwatch.StartNew();
         foreach (var item in new DirectoryInfo(path).EnumerateFileSystemInfos())
         {
-            if (++scanned > 10000) return new { entries, limited = true };
+            if (deadline.ElapsedMilliseconds > 8000) return new { entries, limited = true };
             if (item.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0 || count++ < offset) continue;
-            if (entries.Count == 25) return new { entries, nextOffset = offset + entries.Count };
+            if (entries.Count == 10) return new { entries, nextOffset = offset + entries.Count };
             var file = item as FileInfo;
             entries.Add(new {
                 kind = file == null ? "directory" : "file",
@@ -191,8 +267,10 @@ internal static class WorkspaceHost
 
     private static object ReadChunk(string path, int offset)
     {
+        CheckWorkspacePath(path);
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
+            CheckOpenedPath(stream.SafeFileHandle, path);
             if (stream.Length > FileLimit || offset > stream.Length) throw new ArgumentException("File exceeds the 25 MiB limit or offset is invalid.");
             stream.Seek(offset, SeekOrigin.Begin);
             using (var reader = new BinaryReader(stream))
@@ -208,33 +286,44 @@ internal static class WorkspaceHost
         var bytes = Encoding.UTF8.GetBytes(content);
         if (bytes.Length > 5 * 1024 * 1024 || !Regex.IsMatch(path, @"\.(txt|md|csv|json|html?)$", RegexOptions.IgnoreCase))
             throw new ArgumentException("Use a supported text extension and at most 5 MiB.");
-        Directory.CreateDirectory(Path.GetDirectoryName(path));
-        using (var output = NewFile(path, out path)) output.Write(bytes, 0, bytes.Length);
-        return new { path, bytes = bytes.Length };
+        return Publish(path, bytes.Length, output => output.Write(bytes, 0, bytes.Length));
     }
 
     private static object Copy(string source, string path)
     {
+        CheckWorkspacePath(source);
         using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
+            CheckOpenedPath(input.SafeFileHandle, source);
             if (input.Length > FileLimit) throw new ArgumentException("File exceeds the 25 MiB copy limit.");
             if (!String.Equals(Path.GetExtension(source), Path.GetExtension(path), StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Keep the original file extension when copying.");
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using (var output = NewFile(path, out path)) input.CopyTo(output);
-            return new { path, bytes = input.Length };
+            return Publish(path, input.Length, input.CopyTo);
         }
     }
 
-    private static FileStream NewFile(string path, out string actual)
+    private static object Publish(string path, long bytes, Action<FileStream> write)
     {
-        actual = path;
-        try { return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None); }
+        CheckWorkspacePath(path);
+        var directory = Path.GetDirectoryName(path);
+        Directory.CreateDirectory(directory);
+        CheckWorkspacePath(directory);
+        var staging = Path.Combine(directory, ".nanobrowser-" + Guid.NewGuid().ToString("N") + ".tmp");
+        using (var output = new FileStream(staging, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            CheckOpenedPath(output.SafeFileHandle, staging);
+            write(output);
+            output.Flush(true);
+        }
+        // Only the final name is published. A failed save may leave its unique staging file for manual inspection.
+        CheckWorkspacePath(directory);
+        try { File.Move(staging, path); }
         catch (IOException)
         {
             if (!File.Exists(path)) throw;
+            path = Path.Combine(directory, Path.GetFileNameWithoutExtension(path) + " (" + Guid.NewGuid().ToString("N").Substring(0, 12) + ")" + Path.GetExtension(path));
+            File.Move(staging, path);
         }
-        actual = Path.Combine(Path.GetDirectoryName(path), Path.GetFileNameWithoutExtension(path) + " (" + Guid.NewGuid().ToString("N").Substring(0, 12) + ")" + Path.GetExtension(path));
-        return new FileStream(actual, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        return new { path, bytes };
     }
 }

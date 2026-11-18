@@ -188,17 +188,18 @@ scenario(
 
 scenario(
   'G-6.3-confirm-plain',
-  'A confirm dialog stays with the agent',
-  'only prompt dialogs are protected',
+  'A confirm dialog is a user decision',
+  'the agent can dismiss a dialog and leaves acceptance to the user',
   async ctx => {
     const a = await agentSession(ctx, PAGE);
     await a.call('click', { target: { ref: refOf(await a.call('snapshot'), /button "Confirm something"/) } });
     const r = await a.call('handle_dialog', { accept: true });
+    const dismissed = await a.call('handle_dialog', { accept: false });
     await sleep(100);
     return outcome(
-      'accepted',
-      `${r.ok} ${JSON.stringify(await hits(a.tabId))}`,
-      r.ok && (await hits(a.tabId)).includes('confirm:true'),
+      'hand over acceptance, allow dismissal',
+      `${r.error?.code} ${JSON.stringify(await hits(a.tabId))}`,
+      r.error?.code === 'USER_STEP' && dismissed.ok && (await hits(a.tabId)).includes('confirm:false'),
     );
   },
 );

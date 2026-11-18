@@ -4,6 +4,7 @@
 // yet; without it, the toolbar badge is the only signal.
 import { siteOf } from '@src/browser-control';
 import type { OpenPrompt } from '@src/ui/protocol';
+import { openPanel } from './panel';
 
 const tabOfNotification = new Map<string, number>();
 
@@ -50,6 +51,7 @@ export async function notifyProgress(conversationId: string, count: number, tabI
 }
 
 export function clearNotification(id: string): void {
+  tabOfNotification.delete(id);
   void chrome.notifications?.clear(id).catch(() => undefined);
 }
 
@@ -58,7 +60,7 @@ function onClicked(id: string): void {
   clearNotification(id);
   if (tabId === undefined) return;
   // A click is a user gesture: the panel may open here (it is not known whether Chrome accepts it).
-  chrome.sidePanel.open({ tabId }).catch(() => undefined);
+  openPanel(tabId);
   void chrome.tabs.update(tabId, { active: true }).then(tab => {
     if (tab?.windowId !== undefined) void chrome.windows.update(tab.windowId, { focused: true });
   });

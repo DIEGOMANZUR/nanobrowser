@@ -7,6 +7,7 @@ import type { ToolContext, ToolOutcome } from '../controller';
 import { withPageState } from './navigate';
 import { dialogDetail } from '../text';
 import { siteOf } from '../site';
+import { DELETE_WORDS } from '../interaction/classify';
 import type { UserStepDetails } from '../../protocol/results';
 
 export async function handleDialog(ctx: ToolContext, args: HandleDialogArgs): Promise<ToolOutcome> {
@@ -25,13 +26,14 @@ export async function handleDialog(ctx: ToolContext, args: HandleDialogArgs): Pr
     return { lines: ['handle_dialog · the file chooser was dismissed; no file was chosen'] };
   }
   if (!dialog) throw new LayerError('INVALID_ARGUMENT', 'No JavaScript dialog is open on this tab');
-  // The user answers every page prompt: its message is free text, and what the agent would type goes straight to the
-  // page. Dismissing it, and alerts and confirms, stay with the agent.
-  if (ctx.session.handover && args.accept && dialog.type === 'prompt') {
+  if (ctx.session.handover && args.accept && dialog.type !== 'alert') {
+    if (dialog.type === 'confirm' && DELETE_WORDS.test(dialog.message)) {
+      throw new LayerError('CAPABILITY_DISABLED', 'Deletion is disabled for this agent.');
+    }
     const tabUrl = (await ctx.controller.host.tabs.get(tab.tabId))?.url ?? '';
     throw new LayerError(
       'USER_STEP',
-      `The page asks for an answer in a prompt dialog (${dialogDetail(dialog)}). Answering it is the user's step: nothing was sent.${dialog.hasBrowserHandler ? '' : ' Chrome cannot show this dialog to the user.'}`,
+      `The page asks for a decision in a dialog (${dialogDetail(dialog)}). The user decides: nothing was sent.${dialog.hasBrowserHandler ? '' : ' Chrome cannot show this dialog to the user.'}`,
       {
         details: {
           reason: 'prompt',

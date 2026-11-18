@@ -325,8 +325,10 @@ export async function confirmGate(ctx: ToolContext, input: GateInput): Promise<G
       `The user declined: ${input.action} ${input.description}. Nothing was dispatched.`,
     );
   // The approval was for this site: the tab must still be on it.
-  const now = siteOf((await ctx.controller.host.tabs.get(ctx.tab().tabId))?.url ?? '');
-  if (now !== site) {
+  const currentUrl = (await ctx.controller.host.tabs.get(ctx.tab().tabId))?.url ?? '';
+  const now = siteOf(currentUrl);
+  const currentOrigin = URL.canParse(currentUrl) ? new URL(currentUrl).origin : currentUrl;
+  if (now !== site || currentOrigin !== origin) {
     throw new LayerError(
       'TARGET_CHANGED',
       `The tab left ${quote(site)} while the user decided (it is on ${quote(now)} now). Nothing was dispatched.`,

@@ -97,7 +97,10 @@ export const CONNECTOR_TOOLS: AgentTool[] = [
     description: 'Read the argument schemas for a connector returned by list_connectors.',
     parameters: {
       type: 'object',
-      properties: { connectorId: { type: 'string' } },
+      properties: {
+        connectorId: { type: 'string' },
+        tool: { type: 'string', description: 'One tool name when the catalogue is large' },
+      },
       required: ['connectorId'],
       additionalProperties: false,
     },

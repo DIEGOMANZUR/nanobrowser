@@ -315,7 +315,12 @@ export function Cards({ prompts, answer }: { prompts: OpenPrompt[]; answer: (id:
             return (
               <div key={p.id} className="rounded-lg border border-nb-border p-3 text-sm">
                 <strong>{String(p.data.title ?? '')}</strong>
-                <p className="my-2 whitespace-pre-wrap break-all">{String(p.data.detail ?? '')}</p>
+                <textarea
+                  aria-label="Detalles de la operación"
+                  readOnly
+                  value={String(p.data.detail ?? '')}
+                  className="my-2 h-24 max-h-52 w-full resize-y rounded border border-nb-border bg-nb-bg p-2 font-sans"
+                />
                 <Buttons>
                   <button type="button" className={secondary} onClick={() => reply('approve')}>
                     Permitir

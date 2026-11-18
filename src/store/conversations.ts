@@ -164,6 +164,13 @@ export async function putRun(run: RunRecord): Promise<void> {
   await (await db()).put('runs', { ...run, updatedAt: now() });
 }
 
+export async function recordWorkspaceProgress(conversationId: string, runId: string, count: number): Promise<void> {
+  const tx = (await db()).transaction('runs', 'readwrite');
+  const run = await tx.store.get(conversationId);
+  if (run?.runId === runId) await tx.store.put({ ...run, workspaceActions: count });
+  await tx.done;
+}
+
 export async function listRuns(): Promise<RunRecord[]> {
   return (await db()).getAll('runs');
 }

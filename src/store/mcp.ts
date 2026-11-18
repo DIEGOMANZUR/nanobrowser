@@ -11,10 +11,10 @@ const GOOGLE_ADS_READ = new Set([
 ]);
 const HINDSIGHT_READ = new Set(['recall', 'reflect', 'hindsight_recall', 'hindsight_reflect']);
 export const HINDSIGHT_ADD = new Set(['retain', 'sync_retain']);
-export const ADD_TOOL_NAME = /^(add|append|create|insert|send|submit|upload)(?:[_.-]|[A-Z]|$)/;
 
 export interface RemoteTool {
   name: string;
+  access: 'read' | 'add';
   description?: string;
   inputSchema: Record<string, unknown>;
 }
@@ -31,7 +31,15 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-function allowedTool(item: unknown, kind: Connector['kind'], allowAdds: boolean): RemoteTool | undefined {
+function parseResponse(text: string) {
+  try {
+    return record(JSON.parse(text));
+  } catch {
+    throw new Error('The connector returned malformed JSON.');
+  }
+}
+
+function allowedTool(item: unknown, kind: Connector['kind']): RemoteTool | undefined {
   const tool = record(item);
   const hints = record(tool?.annotations);
   const schema = record(tool?.inputSchema);
@@ -49,12 +57,11 @@ function allowedTool(item: unknown, kind: Connector['kind'], allowAdds: boolean)
       : kind === 'hindsight'
         ? HINDSIGHT_READ.has(tool.name) || hints?.readOnlyHint === true
         : hints?.readOnlyHint === true;
-  const add =
-    (kind === 'hindsight' && HINDSIGHT_ADD.has(tool.name)) ||
-    ((!kind || kind === 'mcp') && allowAdds && hints?.destructiveHint === false && ADD_TOOL_NAME.test(tool.name));
+  const add = kind === 'hindsight' && HINDSIGHT_ADD.has(tool.name);
   if (!read && !add) return undefined;
   return {
     name: tool.name,
+    access: add ? 'add' : 'read',
     description: typeof tool.description === 'string' ? tool.description.slice(0, 250) : undefined,
     inputSchema: schema,
   };
@@ -83,7 +90,7 @@ async function responseObject(response: Response, id: number) {
             .filter(line => line.startsWith('data:'));
           buffer = buffer.slice(split.index + split[0].length);
           if (data.length) {
-            const message = record(JSON.parse(data.map(line => line.slice(5).replace(/^ /, '')).join('\n')));
+            const message = parseResponse(data.map(line => line.slice(5).replace(/^ /, '')).join('\n'));
             if (message?.id === id && ('result' in message || 'error' in message)) return message;
           }
           split = /\r?\n\r?\n/.exec(buffer);
@@ -92,7 +99,7 @@ async function responseObject(response: Response, id: number) {
       if (done) break;
     }
     if (type.toLowerCase().startsWith('application/json')) {
-      const message = record(JSON.parse(buffer));
+      const message = parseResponse(buffer);
       if (message?.id === id) return message;
     }
     throw new Error('The connector did not return a matching response.');
@@ -103,7 +110,7 @@ async function responseObject(response: Response, id: number) {
 }
 
 export async function withConnector<T>(
-  connector: Pick<Connector, 'endpoint' | 'token' | 'local' | 'kind' | 'allowAdds'>,
+  connector: Pick<Connector, 'endpoint' | 'token' | 'local' | 'kind'>,
   userSignal: AbortSignal,
   run: (client: {
     list: () => Promise<RemoteTool[]>;
@@ -169,27 +176,36 @@ export async function withConnector<T>(
     headers.set('MCP-Protocol-Version', version);
     await send('notifications/initialized', undefined, true);
 
+    let catalogue: Map<string, RemoteTool> | undefined;
     return await run({
       async list() {
-        const tools: RemoteTool[] = [];
+        const tools = new Map<string, RemoteTool>();
+        const names = new Set<string>();
         const cursors = new Set<string>();
         let cursor: string | undefined;
         do {
           const page = record(await send('tools/list', cursor ? { cursor } : {}));
           if (!Array.isArray(page?.tools)) throw new Error('The connector returned an invalid tool list.');
           for (const item of page.tools) {
-            const tool = allowedTool(item, connector.kind, !!connector.allowAdds);
-            if (tool) tools.push(tool);
-            if (tools.length >= MAX_TOOLS) return tools;
+            const itemName = record(item)?.name;
+            if (typeof itemName === 'string') {
+              if (names.has(itemName)) throw new Error('The connector returned duplicate tool names.');
+              names.add(itemName);
+            }
+            const tool = allowedTool(item, connector.kind);
+            if (tool) tools.set(tool.name, tool);
+            if (tools.size > MAX_TOOLS) throw new Error('The connector returned too many compatible tools.');
           }
           cursor = typeof page.nextCursor === 'string' ? page.nextCursor : undefined;
           if (cursor && (cursors.has(cursor) || cursors.size >= 9))
             throw new Error('The connector tool list could not be completed.');
           if (cursor) cursors.add(cursor);
         } while (cursor);
-        return tools;
+        catalogue = tools;
+        return [...tools.values()];
       },
       async call(name, args) {
+        if (!catalogue?.has(name)) throw new Error('The tool is unavailable in this connector session.');
         const result = record(await send('tools/call', { name, arguments: args }));
         if (!result || result.isError === true) throw new Error('The remote tool returned an error.');
         return result.structuredContent ?? result.content;
@@ -199,6 +215,18 @@ export async function withConnector<T>(
     if (native) {
       await native.send({ op: 'mcp-close' }).catch(() => undefined);
       native.close();
+    } else if (headers.has('Mcp-Session-Id')) {
+      // Terminate this protocol session. This request has no tool body or account-data operation.
+      void fetch(endpoint, {
+        method: 'DELETE',
+        headers,
+        redirect: 'error',
+        credentials: 'omit',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(3000),
+      })
+        .then(response => response.body?.cancel())
+        .catch(() => undefined);
     }
   }
 }

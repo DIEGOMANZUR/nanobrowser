@@ -113,8 +113,9 @@ export async function upload(ctx: ToolContext, args: UploadArgs): Promise<ToolOu
       resolved,
     };
   } else {
+    const chooser = tab.fileChooser;
     input = await chooserInput(ctx);
-    if (count > 1 && tab.fileChooser?.mode !== 'selectMultiple') {
+    if (count > 1 && chooser?.mode !== 'selectMultiple') {
       throw new LayerError('INVALID_ARGUMENT', `${input.description} takes one file; ${count} were given.`);
     }
     gate = await confirmGate(ctx, {
@@ -128,14 +129,16 @@ export async function upload(ctx: ToolContext, args: UploadArgs): Promise<ToolOu
       intent: files ? 'Files: ' + files : args.intent,
       category: 'upload',
     });
-    // The page may have closed its chooser while the user was asked.
-    if (gate.prompted && !tab.fileChooser)
-      throw new LayerError('TARGET_CHANGED', 'The file chooser closed before the upload.');
+    if (tab.fileChooser !== chooser) {
+      await tab.probe?.release(input.frame, input.objectId).catch(() => undefined);
+      throw new LayerError('TARGET_CHANGED', 'The file chooser changed before the upload.');
+    }
   }
 
   const probe = tab.probe!;
   try {
     const { evidence } = await withEvidence(ctx, input.resolved ?? null, args.expect, {}, async () => {
+      ctx.signal?.throwIfAborted();
       if (args.paths) {
         await (
           await ctx.attach()
@@ -151,6 +154,7 @@ export async function upload(ctx: ToolContext, args: UploadArgs): Promise<ToolOu
         }));
         for (const [i, a] of args.attachments!.entries()) {
           for (let at = 0; at < a.base64.length || at === 0; at += CHUNK) {
+            ctx.signal?.throwIfAborted();
             await probe.call<number>(
               input.frame,
               input.objectId,
@@ -160,6 +164,7 @@ export async function upload(ctx: ToolContext, args: UploadArgs): Promise<ToolOu
             );
           }
         }
+        ctx.signal?.throwIfAborted();
         await probe.call<FileInfo[]>(input.frame, input.objectId, 'setFiles', specs);
       }
       tab.actionSeq++;

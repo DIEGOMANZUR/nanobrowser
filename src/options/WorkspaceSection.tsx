@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { DEFAULT_WORKSPACE_POLICY, updateWorkspacePolicy, workspace, workspacePolicy } from '@src/store/workspace';
+import {
+  DEFAULT_WORKSPACE_POLICY,
+  WORKSPACE_POLICY_KEY,
+  WORKSPACE_POLICY_REQUEST,
+  workspace,
+  workspacePolicy,
+} from '@src/store/workspace';
 import type { Connector, FolderMode, WorkspaceDirectory, WorkspaceFolder, WorkspacePolicy } from '@src/store/workspace';
 import { nativeRequest } from '@src/store/native-workspace';
 import { connectorEndpoint, withConnector } from '@src/store/mcp';
@@ -23,6 +29,7 @@ export function WorkspaceSection() {
   const [status, setStatus] = useState('');
   const [windowsReady, setWindowsReady] = useState(false);
   const [allowFull, setAllowFull] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const kind = draft.kind ?? 'mcp';
   const google = isGoogleKind(kind);
   const googleSignIn = google && !!chrome.runtime.getManifest().oauth2?.client_id && !!chrome.identity?.getAuthToken;
@@ -34,6 +41,7 @@ export function WorkspaceSection() {
         setAllowFull(settings.access === 'full');
         setFolders(directories);
         setConnectors(services);
+        setLoaded(true);
       })
       .catch(error => setStatus(String(error)));
     void chrome.permissions.contains({ permissions: ['nativeMessaging'] }).then(granted => {
@@ -42,6 +50,17 @@ export function WorkspaceSection() {
           .then(() => setWindowsReady(true))
           .catch(() => undefined);
     });
+    const changed: Parameters<typeof chrome.storage.onChanged.addListener>[0] = (changes, area) => {
+      if (area !== 'local' || !(WORKSPACE_POLICY_KEY in changes)) return;
+      const next = {
+        ...DEFAULT_WORKSPACE_POLICY,
+        ...(changes[WORKSPACE_POLICY_KEY].newValue as Partial<WorkspacePolicy> | undefined),
+      };
+      setPolicy(next);
+      setAllowFull(next.access === 'full');
+    };
+    chrome.storage.onChanged.addListener(changed);
+    return () => chrome.storage.onChanged.removeListener(changed);
   }, []);
 
   const perform = async (work: () => Promise<void>) => {
@@ -56,9 +75,12 @@ export function WorkspaceSection() {
     }
   };
   const change = async (update: Partial<WorkspacePolicy>) => {
-    const settings = { ...policy, ...update };
-    await updateWorkspacePolicy(settings);
-    setPolicy(settings);
+    const result = await chrome.runtime.sendMessage<
+      { type: string; patch: Partial<WorkspacePolicy> },
+      { policy?: WorkspacePolicy; error?: string }
+    >({ type: WORKSPACE_POLICY_REQUEST, patch: update });
+    if (!result?.policy) throw new Error(result?.error ?? 'No se pudieron guardar los permisos.');
+    setPolicy(result.policy);
   };
   const chooseFolder = () =>
     perform(async () => {
@@ -139,7 +161,7 @@ export function WorkspaceSection() {
           <select
             className={field}
             value={policy.access}
-            disabled={busy}
+            disabled={busy || !loaded}
             onChange={e => {
               const next = e.target.value as WorkspacePolicy['access'];
               void perform(() => change({ access: next }));
@@ -159,8 +181,16 @@ export function WorkspaceSection() {
           </button>
           {windowsReady && (
             <label>
-              <input type="checkbox" checked={allowFull} onChange={e => setAllowFull(e.target.checked)} /> Habilitar
-              opción de acceso completo
+              <input
+                type="checkbox"
+                disabled={busy || !loaded}
+                checked={allowFull}
+                onChange={e => {
+                  setAllowFull(e.target.checked);
+                  if (!e.target.checked && policy.access === 'full') void perform(() => change({ access: 'folders' }));
+                }}
+              />{' '}
+              Habilitar opción de acceso completo
             </label>
           )}
         </div>
@@ -220,6 +250,7 @@ export function WorkspaceSection() {
           <select
             className={field}
             value={policy.actions}
+            disabled={busy || !loaded}
             onChange={e => void perform(() => change({ actions: e.target.value as WorkspacePolicy['actions'] }))}>
             <option value="auto">Automático</option>
             <option value="chat">Según el modo del chat</option>
@@ -228,7 +259,7 @@ export function WorkspaceSection() {
           </select>
         </label>
         {policy.actions === 'groups' && (
-          <fieldset className="grid gap-2 text-sm">
+          <fieldset className="grid gap-2 text-sm" disabled={busy || !loaded}>
             <legend>Grupos que requieren aprobación</legend>
             {(
               [
@@ -253,6 +284,7 @@ export function WorkspaceSection() {
           <input
             type="checkbox"
             checked={policy.unlimited}
+            disabled={busy || !loaded}
             onChange={e => void perform(() => change({ unlimited: e.target.checked }))}
           />{' '}
           Sin límite fijo de pasos, con aviso cada 100
@@ -298,116 +330,108 @@ export function WorkspaceSection() {
             </li>
           ))}
         </ul>
-        <form className="grid gap-3 text-sm" onSubmit={saveConnector}>
-          <label className="space-y-1">
-            <span>Tipo</span>
-            <select
-              className={field}
-              value={draft.kind ?? 'mcp'}
-              onChange={e => editConnector({ ...blank, kind: e.target.value as Connector['kind'] })}>
-              <option value="mcp">MCP (Model Context Protocol)</option>
-              <option value="googleAds">Google Ads</option>
-              <option value="hindsight">Hindsight</option>
-              <option value="gmail">Gmail</option>
-              <option value="calendar">Google Calendar</option>
-              <option value="drive">Google Drive</option>
-            </select>
-          </label>
-          <label className="space-y-1">
-            <span>Nombre</span>
-            <input
-              className={field}
-              required
-              maxLength={80}
-              value={draft.name}
-              onChange={e => setDraft({ ...draft, name: e.target.value })}
-            />
-          </label>
-          {!google && (
-            <>
-              <label>
-                <input
-                  type="checkbox"
-                  disabled={!windowsReady}
-                  checked={!!draft.local}
-                  onChange={e => {
-                    setDraft({ ...draft, endpoint: '', token: '', tools: [], local: e.target.checked });
-                    setDiscovered([]);
-                  }}
-                />{' '}
-                Usar un servidor instalado en Windows
-              </label>
-              <label className="space-y-1">
-                <span>
-                  {draft.local
-                    ? 'Nombre en servers.json'
-                    : 'Dirección HTTPS (protocolo seguro de transferencia de hipertexto)'}
-                </span>
-                <input
-                  className={field}
-                  type={draft.local ? 'text' : 'url'}
-                  required
-                  value={draft.endpoint}
-                  onChange={e => {
-                    setDraft({ ...draft, endpoint: e.target.value, tools: [] });
-                    setDiscovered([]);
-                  }}
-                  placeholder={draft.local ? 'servidor-local' : 'https://servidor.example/mcp'}
-                />
-              </label>
-            </>
-          )}
-          {!draft.local && (
+        <form className="text-sm" onSubmit={saveConnector}>
+          <fieldset disabled={busy || !loaded} className="grid gap-3">
             <label className="space-y-1">
-              <span>{googleSignIn ? 'Token manual (opcional)' : 'Token de acceso'}</span>
+              <span>Tipo</span>
+              <select
+                className={field}
+                value={draft.kind ?? 'mcp'}
+                onChange={e => editConnector({ ...blank, kind: e.target.value as Connector['kind'] })}>
+                <option value="mcp">MCP (Model Context Protocol)</option>
+                <option value="googleAds">Google Ads</option>
+                <option value="hindsight">Hindsight</option>
+                <option value="gmail">Gmail</option>
+                <option value="calendar">Google Calendar</option>
+                <option value="drive">Google Drive</option>
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span>Nombre</span>
               <input
                 className={field}
-                type="password"
-                autoComplete="off"
-                value={draft.token}
-                onChange={e => setDraft({ ...draft, token: e.target.value })}
+                required
+                maxLength={80}
+                value={draft.name}
+                onChange={e => setDraft({ ...draft, name: e.target.value })}
               />
             </label>
-          )}
-          {kind === 'mcp' && (
-            <label>
-              <input
-                type="checkbox"
-                checked={!!draft.allowAdds}
-                onChange={e => {
-                  setDraft({ ...draft, tools: [], allowAdds: e.target.checked });
-                  setDiscovered([]);
-                }}
-              />{' '}
-              Incluir operaciones de creación declaradas como no destructivas por este servidor
-            </label>
-          )}
-          <button type="button" className={button} disabled={busy} onClick={() => void discover()}>
-            Ver herramientas compatibles
-          </button>
-          {!!discovered.length && (
-            <fieldset className="grid gap-2">
-              <legend>Herramientas autorizadas</legend>
-              {discovered.map(name => (
-                <label key={name} className="break-all">
+            {!google && (
+              <>
+                <label>
                   <input
                     type="checkbox"
-                    checked={draft.tools.includes(name)}
-                    onChange={e =>
-                      setDraft({
-                        ...draft,
-                        tools: e.target.checked ? [...draft.tools, name] : draft.tools.filter(tool => tool !== name),
-                      })
-                    }
+                    disabled={!windowsReady}
+                    checked={!!draft.local}
+                    onChange={e => {
+                      setDraft({ ...draft, endpoint: '', token: '', tools: [], local: e.target.checked });
+                      setDiscovered([]);
+                    }}
                   />{' '}
-                  {name}
+                  Usar un servidor instalado en Windows
                 </label>
-              ))}
-            </fieldset>
-          )}
-          <button type="submit" className={button} disabled={busy || !draft.tools.length}>
-            Guardar conector
-          </button>
+                <label className="space-y-1">
+                  <span>
+                    {draft.local
+                      ? 'Nombre en servers.json'
+                      : 'Dirección HTTPS (protocolo seguro de transferencia de hipertexto)'}
+                  </span>
+                  <input
+                    className={field}
+                    type={draft.local ? 'text' : 'url'}
+                    required
+                    value={draft.endpoint}
+                    onChange={e => {
+                      setDraft({ ...draft, endpoint: e.target.value, tools: [] });
+                      setDiscovered([]);
+                    }}
+                    placeholder={draft.local ? 'servidor-local' : 'https://servidor.example/mcp'}
+                  />
+                </label>
+              </>
+            )}
+            {!draft.local && (
+              <label className="space-y-1">
+                <span>{googleSignIn ? 'Token manual (opcional)' : 'Token de acceso'}</span>
+                <input
+                  className={field}
+                  type="password"
+                  autoComplete="off"
+                  value={draft.token}
+                  onChange={e => setDraft({ ...draft, token: e.target.value })}
+                />
+              </label>
+            )}
+            {kind === 'mcp' && (
+              <p className="text-nb-fg/70">Conecta servidores de confianza con credenciales de solo lectura.</p>
+            )}
+            <button type="button" className={button} disabled={busy} onClick={() => void discover()}>
+              Ver herramientas compatibles
+            </button>
+            {!!discovered.length && (
+              <fieldset className="grid gap-2">
+                <legend>Herramientas autorizadas</legend>
+                {discovered.map(name => (
+                  <label key={name} className="break-all">
+                    <input
+                      type="checkbox"
+                      checked={draft.tools.includes(name)}
+                      onChange={e =>
+                        setDraft({
+                          ...draft,
+                          tools: e.target.checked ? [...draft.tools, name] : draft.tools.filter(tool => tool !== name),
+                        })
+                      }
+                    />{' '}
+                    {name}
+                  </label>
+                ))}
+              </fieldset>
+            )}
+            <button type="submit" className={button} disabled={busy || !draft.tools.length}>
+              Guardar conector
+            </button>
+          </fieldset>
         </form>
       </SettingsCard>
       {status && (

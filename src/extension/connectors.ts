@@ -1,9 +1,31 @@
 import type { ContentSource } from '@src/browser-control';
-import { ADD_TOOL_NAME, HINDSIGHT_ADD, withConnector } from '@src/store/mcp';
+import { HINDSIGHT_ADD, withConnector } from '@src/store/mcp';
 import { workspace, workspacePolicy } from '@src/store/workspace';
+import type { Connector, WorkspacePolicy } from '@src/store/workspace';
 import { GOOGLE_TOOL_GUIDE, googleCall, googleToken, isGoogleKind } from '@src/store/google-workspace';
 import { workspaceResult } from './workspace-actions';
 import type { Approve } from './workspace-actions';
+
+function sameConnection(live: Connector | undefined, original: Connector, tool?: string): live is Connector {
+  return (
+    !!live?.enabled &&
+    (!tool || live.tools.includes(tool)) &&
+    live.name === original.name &&
+    live.endpoint === original.endpoint &&
+    live.token === original.token &&
+    live.kind === original.kind &&
+    live.local === original.local
+  );
+}
+
+function requiresApproval(policy: WorkspacePolicy, transfer: boolean) {
+  if (policy.actions === 'groups') return policy.connectors || (transfer && policy.transfers);
+  return transfer && (policy.actions === 'send' || policy.actions === 'chat');
+}
+
+function redact(text: string, credential: string) {
+  return credential ? text.replaceAll(credential, '[redacted]') : text;
+}
 
 export async function connectorAction(
   tool: string,
@@ -11,6 +33,7 @@ export async function connectorAction(
   approve: Approve,
   wrap: (text: string, source: ContentSource) => string,
   signal: AbortSignal,
+  chatAsks: () => boolean = () => true,
 ) {
   if (tool === 'list_connectors') {
     const connectors = (await workspace.connectors())
@@ -26,28 +49,59 @@ export async function connectorAction(
   const name = typeof data.tool === 'string' ? data.tool : '';
   const connector = await workspace.connector(id);
   if (!connector?.enabled) throw new Error('This connector is not enabled.');
+  const original = connector;
+  async function authorize(action: string, transfer: boolean, details: string, toolName?: string, write = false) {
+    const shouldAsk = (policy: WorkspacePolicy) =>
+      requiresApproval(policy, transfer) || (write && policy.actions === 'chat' && chatAsks());
+    const needsApproval = shouldAsk(await workspacePolicy());
+    const destination = original.local ? 'Windows · ' + original.endpoint : redact(original.endpoint, original.token);
+    if (
+      needsApproval &&
+      !(await approve(
+        'Usar conector',
+        [original.name + ' · ' + action, destination, details].filter(Boolean).join('\n'),
+        signal,
+      ))
+    ) {
+      throw new Error('The user declined this connector call. Do not retry without new instructions.');
+    }
+    const live = await workspace.connector(id);
+    if (!sameConnection(live, original, toolName) || (!needsApproval && shouldAsk(await workspacePolicy()))) {
+      throw new Error('The user changed the connector or its approval policy.');
+    }
+    signal.throwIfAborted();
+    return live;
+  }
   if (tool === 'describe_connector') {
     const kind = connector.kind;
+    if (data.tool !== undefined && !connector.tools.includes(name))
+      throw new Error('This connector tool is not enabled.');
+    const live = isGoogleKind(kind) ? connector : await authorize('Consultar herramientas', false, '');
+    const selected = (toolName: string) => live.tools.includes(toolName) && (!name || name === toolName);
     const schema = isGoogleKind(kind)
-      ? connector.tools.map(name => ({ name, arguments: GOOGLE_TOOL_GUIDE[name] }))
-      : await withConnector(connector, signal, async client =>
-          (await client.list()).filter(t => connector.tools.includes(t.name)),
-        );
-    return workspaceResult(schema, wrap, 'connector schemas');
+      ? live.tools.filter(selected).map(name => ({ name, arguments: GOOGLE_TOOL_GUIDE[name] }))
+      : await withConnector(live, signal, async client => (await client.list()).filter(t => selected(t.name)));
+    const encoded = redact(JSON.stringify(schema), live.token);
+    if (encoded.length > 6000 && !name)
+      return workspaceResult(
+        { tools: live.tools, detail: 'Call describe_connector with one tool name.' },
+        wrap,
+        'connector schemas',
+      );
+    return workspaceResult(encoded, wrap, 'connector schemas');
   }
   if (!connector.tools.includes(name)) throw new Error('This connector tool is not enabled.');
   if (typeof data.argumentsJson !== 'string' || data.argumentsJson.length > 64_000)
     throw new Error('Use a JSON object of at most 64,000 characters.');
-  const args: unknown = JSON.parse(data.argumentsJson);
+  let args: unknown;
+  try {
+    args = JSON.parse(data.argumentsJson);
+  } catch {
+    throw new Error('Invalid connector arguments. Provide a valid JSON object.');
+  }
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Invalid tool arguments.');
   const input = args as Record<string, unknown>;
-  const policy = await workspacePolicy();
   const memoryWrite = connector.kind === 'hindsight' && HINDSIGHT_ADD.has(name);
-  const transfer =
-    name === 'send_message' ||
-    name === 'create_text_file' ||
-    memoryWrite ||
-    (connector.allowAdds && ADD_TOOL_NAME.test(name));
   if (
     memoryWrite &&
     (typeof input.content !== 'string' ||
@@ -57,51 +111,35 @@ export async function connectorAction(
   ) {
     throw new Error('Saving a memory requires new content and cannot target an existing document.');
   }
-  if (
-    (transfer &&
-      (policy.actions === 'send' || policy.actions === 'chat' || (policy.actions === 'groups' && policy.transfers))) ||
-    (policy.actions === 'groups' && policy.connectors)
-  ) {
-    const destination =
-      name === 'send_message'
-        ? String(input.to ?? '') + '\n' + String(input.subject ?? '')
-        : String(input.name ?? input.title ?? (memoryWrite ? input.content : '') ?? '');
-    if (
-      !(await approve(
-        'Usar conector',
-        connector.name + ' · ' + name + (destination ? '\n' + destination.slice(0, 350) : ''),
-        signal,
-      ))
-    ) {
-      throw new Error('The user declined this connector call. Do not retry without new instructions.');
-    }
+  const details = redact(data.argumentsJson, connector.token);
+  let credential = connector.token;
+  let result: unknown;
+  if (isGoogleKind(connector.kind)) {
+    const transfer = name === 'send_message' || name === 'create_text_file';
+    const live = await authorize(name, transfer, details, name, transfer || name === 'create_event');
+    credential = await googleToken(live);
+    if (!sameConnection(await workspace.connector(id), live, name)) throw new Error('The user changed the connector.');
+    result = await googleCall({ ...live, token: credential }, name, input, signal);
+  } else {
+    // The approval precedes establishing a session. A local server may start when it is initialized.
+    const transfer = memoryWrite;
+    const live = await authorize(name, transfer, details, name);
+    result = await withConnector(live, signal, async client => {
+      const tool = (await client.list()).find(t => t.name === name);
+      if (!tool || (tool.access === 'add' && !transfer) || !sameConnection(await workspace.connector(id), live, name)) {
+        throw new Error('This tool is no longer approved for this connector.');
+      }
+      return client.call(name, input);
+    }).catch(error => {
+      throw new Error(redact(error instanceof Error ? error.message : 'Connector request failed.', live.token));
+    });
   }
-  const live = await workspace.connector(id);
-  if (
-    !live?.enabled ||
-    !live.tools.includes(name) ||
-    live.endpoint !== connector.endpoint ||
-    live.token !== connector.token ||
-    live.kind !== connector.kind ||
-    live.local !== connector.local ||
-    live.allowAdds !== connector.allowAdds
-  ) {
-    throw new Error('The user changed this connector.');
-  }
-  const credential = isGoogleKind(live.kind) ? await googleToken(live) : live.token;
-  const result = isGoogleKind(live.kind)
-    ? await googleCall({ ...live, token: credential }, name, input, signal)
-    : await withConnector(live, signal, async client => {
-        const tools = await client.list();
-        if (!tools.some(t => t.name === name)) throw new Error('This tool is no longer approved for this connector.');
-        return client.call(name, input);
-      });
   const serialized = JSON.stringify(result) ?? 'null';
-  const sanitized = credential ? serialized.replaceAll(credential, '[redacted]') : serialized;
-  return workspaceResult(
-    { tool: name, result: sanitized.slice(0, 5000) },
-    wrap,
-    'connector result',
-    'Conector · ' + name,
-  );
+  const sanitized = redact(serialized, credential);
+  const output = result && typeof result === 'object' ? (result as Record<string, unknown>) : {};
+  const cursor =
+    typeof output.nextPageToken === 'string'
+      ? 'nextPageToken: ' + redact(JSON.stringify(output.nextPageToken.slice(0, 1000)), credential) + '\n'
+      : '';
+  return workspaceResult(cursor + sanitized, wrap, 'connector result', 'Conector · ' + name);
 }

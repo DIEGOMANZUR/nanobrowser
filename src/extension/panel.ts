@@ -18,12 +18,15 @@ chrome.action.onClicked.addListener(tab => {
 
 chrome.commands.onCommand.addListener((command, tab) => {
   if (command === 'open-activity-window') {
-    void chrome.windows.create({ url: chrome.runtime.getURL('activity.html'), type: 'popup', width: 440, height: 640 });
+    const target = tab?.id === undefined ? '' : '&tab=' + tab.id;
+    void chrome.windows
+      .create({ url: chrome.runtime.getURL('activity.html#popup' + target), type: 'popup', width: 440, height: 640 })
+      .catch(() => undefined);
     return;
   }
   if (tab?.id === undefined) return;
   if (command === 'open-panel') openPanel(tab.id);
-  if (command === 'open-activity') openPanel(tab.id, 'activity.html');
+  if (command === 'open-activity') openPanel(tab.id, 'activity.html#tab=' + tab.id);
   // The layer's test panel is a developer tool; it has no button.
   if (command === 'open-test-panel') openPanel(tab.id, TEST_PANEL_PATH);
 });

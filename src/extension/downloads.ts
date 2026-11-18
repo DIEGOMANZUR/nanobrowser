@@ -3,10 +3,12 @@
 // document when it holds none.
 const OFFSCREEN = 'offscreen.html';
 const held = new Set<string>();
+let creating: Promise<void> | undefined;
+let requests = 0;
 /** The name asked for each blob URL being saved. */
 const naming = new Map<string, string>();
 
-async function ensureOffscreen(): Promise<void> {
+async function createOffscreen(): Promise<void> {
   const url = chrome.runtime.getURL(OFFSCREEN);
   const contexts = await chrome.runtime.getContexts({
     contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT],
@@ -20,24 +22,36 @@ async function ensureOffscreen(): Promise<void> {
   });
 }
 
+function ensureOffscreen(): Promise<void> {
+  return (creating ??= createOffscreen().finally(() => {
+    creating = undefined;
+  }));
+}
+
 async function revoke(url: string): Promise<void> {
   if (!held.delete(url)) return;
   const answer = (await chrome.runtime.sendMessage({ target: 'offscreen', type: 'revoke', url }).catch(() => null)) as {
     held?: number;
   } | null;
-  if (!held.size && (answer?.held ?? 0) === 0) await chrome.offscreen.closeDocument().catch(() => undefined);
+  if (!held.size && !requests && (answer?.held ?? 0) === 0)
+    await chrome.offscreen.closeDocument().catch(() => undefined);
 }
 
 /** A blob URL for the content, made in the offscreen document. */
 export async function blobUrl(content: string, mimeType: string): Promise<string> {
-  await ensureOffscreen();
-  const answer = (await chrome.runtime.sendMessage({ target: 'offscreen', type: 'blob-url', content, mimeType })) as {
-    url: string;
-  };
-  held.add(answer.url);
-  // Revoked anyway after 10 minutes.
-  setTimeout(() => void revoke(answer.url), 10 * 60_000);
-  return answer.url;
+  requests++;
+  try {
+    await ensureOffscreen();
+    const answer = (await chrome.runtime.sendMessage({ target: 'offscreen', type: 'blob-url', content, mimeType })) as {
+      url: string;
+    };
+    held.add(answer.url);
+    // Revoked anyway after 10 minutes.
+    setTimeout(() => void revoke(answer.url), 10 * 60_000);
+    return answer.url;
+  } finally {
+    requests--;
+  }
 }
 
 export interface SavedFile {
@@ -49,23 +63,41 @@ export interface SavedFile {
 }
 
 /** Waits for a download to complete or be interrupted. */
-function follow(downloadId: number): Promise<{ state: 'complete' | 'interrupted'; error?: string }> {
+function follow(
+  downloadId: number,
+  signal?: AbortSignal,
+): Promise<{ state: 'complete' | 'interrupted'; error?: string }> {
   return new Promise(resolve => {
     const done = (state: 'complete' | 'interrupted', error?: string) => {
       chrome.downloads.onChanged.removeListener(listener);
+      signal?.removeEventListener('abort', abort);
+      clearTimeout(timer);
       resolve({ state, ...(error ? { error } : {}) });
+    };
+    const abort = () => {
+      void chrome.downloads.cancel(downloadId).catch(() => undefined);
+      done('interrupted', 'The task was stopped. Check Downloads for the final state.');
     };
     const listener = (delta: chrome.downloads.DownloadDelta) => {
       if (delta.id !== downloadId || !delta.state?.current) return;
       if (delta.state.current === 'complete') done('complete');
       else if (delta.state.current === 'interrupted') done('interrupted', delta.error?.current);
     };
+    const timer = setTimeout(
+      () => done('interrupted', 'Chrome has not confirmed the download. Check Downloads before retrying.'),
+      60_000,
+    );
     chrome.downloads.onChanged.addListener(listener);
+    if (signal?.aborted) return abort();
+    signal?.addEventListener('abort', abort, { once: true });
     // It may have ended before the listener was added.
-    void chrome.downloads.search({ id: downloadId }).then(([item]) => {
-      if (item?.state === 'complete') done('complete');
-      else if (item?.state === 'interrupted') done('interrupted', item.error);
-    });
+    void chrome.downloads
+      .search({ id: downloadId })
+      .then(([item]) => {
+        if (item?.state === 'complete') done('complete');
+        else if (item?.state === 'interrupted') done('interrupted', item.error);
+      })
+      .catch(() => done('interrupted', 'Chrome could not report the download state.'));
   });
 }
 
@@ -82,7 +114,6 @@ function suggestName(
   const filename = item.byExtensionId === chrome.runtime.id ? naming.get(item.url) : undefined;
   if (!filename) return suggest();
   suggest({ filename, conflictAction: 'uniquify' });
-  stopNaming(item.url);
 }
 
 function stopNaming(url: string): void {
@@ -105,18 +136,22 @@ export function isNumberedCopy(saved: string, asked: string): boolean {
 export async function saveText(
   file: { filename: string; content: string; mimeType: string },
   saveAs = false,
+  signal?: AbortSignal,
 ): Promise<SavedFile> {
+  signal?.throwIfAborted();
   const url = await blobUrl(file.content, file.mimeType);
   naming.set(url, file.filename);
   chrome.downloads.onDeterminingFilename.addListener(suggestName);
   try {
+    signal?.throwIfAborted();
     const downloadId = await chrome.downloads.download({
       url,
       filename: file.filename,
       conflictAction: 'uniquify',
       saveAs,
     });
-    const end = await follow(downloadId);
+    stopNaming(url);
+    const end = await follow(downloadId, signal);
     const [item] = await chrome.downloads.search({ id: downloadId });
     const name = item?.filename ? item.filename.split(/[/\\]/).pop()! : file.filename;
     return { downloadId, name, ...end };

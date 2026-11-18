@@ -24,7 +24,6 @@ export interface Connector {
   enabled: boolean;
   kind?: 'mcp' | 'googleAds' | 'hindsight' | 'gmail' | 'calendar' | 'drive';
   local?: boolean;
-  allowAdds?: boolean;
 }
 
 export interface WorkspacePolicy {
@@ -47,13 +46,27 @@ export const DEFAULT_WORKSPACE_POLICY: WorkspacePolicy = {
   unlimited: false,
 };
 
+export const WORKSPACE_POLICY_KEY = 'nb.workspacePolicy';
+export const WORKSPACE_POLICY_REQUEST = 'nb.workspacePolicy.patch';
+
 export async function workspacePolicy(): Promise<WorkspacePolicy> {
-  const saved = await chrome.storage.local.get('nb.workspacePolicy');
-  return { ...DEFAULT_WORKSPACE_POLICY, ...(saved['nb.workspacePolicy'] as Partial<WorkspacePolicy> | undefined) };
+  const saved = await chrome.storage.local.get(WORKSPACE_POLICY_KEY);
+  return { ...DEFAULT_WORKSPACE_POLICY, ...(saved[WORKSPACE_POLICY_KEY] as Partial<WorkspacePolicy> | undefined) };
 }
 
 export async function updateWorkspacePolicy(policy: WorkspacePolicy) {
-  await chrome.storage.local.set({ 'nb.workspacePolicy': policy });
+  await chrome.storage.local.set({ [WORKSPACE_POLICY_KEY]: policy });
+}
+
+let policyWrites: Promise<unknown> = Promise.resolve();
+export function patchWorkspacePolicy(update: Partial<WorkspacePolicy>) {
+  const saved = policyWrites.then(async () => {
+    const policy = { ...(await workspacePolicy()), ...update };
+    await updateWorkspacePolicy(policy);
+    return policy;
+  });
+  policyWrites = saved.catch(() => undefined);
+  return saved;
 }
 
 interface WorkspaceDb extends DBSchema {
@@ -79,4 +92,12 @@ export const workspace = {
   connectors: async () => (await db()).getAll('connectors'),
   connector: async (id: string) => (await db()).get('connectors', id),
   putConnector: async (connector: Connector) => (await db()).put('connectors', connector),
+  clear: async () => {
+    const transaction = (await db()).transaction(['folders', 'connectors'], 'readwrite');
+    await Promise.all([
+      transaction.objectStore('folders').clear(),
+      transaction.objectStore('connectors').clear(),
+      transaction.done,
+    ]);
+  },
 };

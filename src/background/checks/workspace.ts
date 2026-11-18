@@ -1,7 +1,8 @@
 import { fileAction, resolveWorkspaceUpload } from '@src/extension/workspace-actions';
 import { getEntries, getRun, listConversations } from '@src/store/conversations';
 import { nativeRequest } from '@src/store/native-workspace';
-import { DEFAULT_WORKSPACE_POLICY, updateWorkspacePolicy } from '@src/store/workspace';
+import { createAgentSession } from '@src/extension/agent-session';
+import { DEFAULT_WORKSPACE_POLICY, WORKSPACE_POLICY_KEY, updateWorkspacePolicy } from '@src/store/workspace';
 import { FIXTURE_ORIGIN } from '../fixtures-config';
 import { defineCheck } from './registry';
 import { layer } from '../layer';
@@ -9,21 +10,55 @@ import { openTab } from '../tabs';
 import { openPanelTab, panel, scriptReplies, seedFixtureModel, waitForText } from './panel-chat';
 
 defineCheck({
+  name: 'workspace-protected-actions',
+  title: 'Workspace destructive dialog protection',
+  description: 'Checks the product agent against an ordinary browser confirmation on a fixture page.',
+  async run() {
+    const { controller } = await layer();
+    const session = createAgentSession(controller, { decideWrite: () => ({ decision: 'run', canRemember: false }) });
+    const tab = await openTab(FIXTURE_ORIGIN + '/c-dialogs.html');
+    session.shareTab(tab.id!);
+    try {
+      await session.call('snapshot', { tabId: tab.id });
+      await session.call('click', { tabId: tab.id, target: { role: 'button', name: 'Ask confirm' } });
+      const refused = await session.call('handle_dialog', { tabId: tab.id, accept: true });
+      if (refused.error?.code !== 'CAPABILITY_DISABLED')
+        throw new Error('The destructive confirmation was not blocked.');
+      const dismissed = await session.call('handle_dialog', { tabId: tab.id, accept: false });
+      if (!dismissed.ok) throw new Error('The confirmation could not be dismissed.');
+      const shortcuts = await chrome.commands.getAll();
+      if (
+        !shortcuts.some(command => command.name === 'open-activity') ||
+        !shortcuts.some(command => command.name === 'open-activity-window')
+      ) {
+        throw new Error('The activity commands are not registered.');
+      }
+      return { destructiveDialogBlocked: true, dismissAvailable: true, activityCommandsRegistered: true };
+    } finally {
+      await controller.closeSession(session);
+      await chrome.tabs.remove(tab.id!);
+    }
+  },
+});
+
+defineCheck({
   name: 'workspace-milestone',
   title: 'Workspace milestone in a live run',
   description:
     'Runs 101 tools from the side panel with the regular run cap set to one and checks the recorded milestone.',
   async run() {
-    await seedFixtureModel();
-    const storage = await chrome.storage.local.get('nb.settings');
-    await chrome.storage.local.set({ 'nb.settings': { ...(storage['nb.settings'] as object), turnCap: 1 } });
-    await updateWorkspacePolicy({ ...DEFAULT_WORKSPACE_POLICY, unlimited: true });
-    await scriptReplies([
-      ...Array.from({ length: 101 }, () => ({ toolCalls: [{ name: 'list_workspace_folders', input: {} }] })),
-      { text: 'Finished the 101 operations.' },
-    ]);
-    const tab = await openPanelTab();
+    const previous = await chrome.storage.local.get(['nb.settings', 'nb.providers', WORKSPACE_POLICY_KEY]);
+    let tab: chrome.tabs.Tab | undefined;
     try {
+      await seedFixtureModel();
+      const storage = await chrome.storage.local.get('nb.settings');
+      await chrome.storage.local.set({ 'nb.settings': { ...(storage['nb.settings'] as object), turnCap: 1 } });
+      await updateWorkspacePolicy({ ...DEFAULT_WORKSPACE_POLICY, unlimited: true });
+      await scriptReplies([
+        ...Array.from({ length: 101 }, () => ({ toolCalls: [{ name: 'list_workspace_folders', input: {} }] })),
+        { text: 'Finished the 101 operations.' },
+      ]);
+      tab = await openPanelTab();
       const message = 'Run the Workspace milestone test';
       await panel(tab.id!, 'type-send', { text: message });
       await waitForText(tab.id!, 'Finished the 101 operations.', 60_000);
@@ -45,7 +80,11 @@ defineCheck({
       }
       return { steps: steps.length, milestone: 100, notices: notices.length };
     } finally {
-      await chrome.tabs.remove(tab.id!);
+      if (tab?.id !== undefined) await chrome.tabs.remove(tab.id);
+      await chrome.storage.local.remove(
+        ['nb.settings', 'nb.providers', WORKSPACE_POLICY_KEY].filter(key => !(key in previous)),
+      );
+      await chrome.storage.local.set(previous);
     }
   },
 });
@@ -58,68 +97,72 @@ defineCheck({
     const directory = (args as { directory?: string }).directory;
     if (!directory || !/[/\\]workspace-qa-[a-z0-9-]+$/i.test(directory))
       throw new Error('Supply a dedicated workspace-qa fixture directory.');
-    const signal = AbortSignal.timeout(30_000);
-    const wrap = (text: string) => text;
-    const input = { folderId: 'windows', path: directory };
-    const approval = async () => true;
-    const read = (path: string) => fileAction('read_workspace_file', { ...input, path }, approval, wrap, signal);
-    const source = directory + '\\original.txt';
-    const original = 'Contenido de prueba original.';
-    const rejected = async () => false;
-    await updateWorkspacePolicy({ ...DEFAULT_WORKSPACE_POLICY, access: 'ask' });
-    const denied = await fileAction('browse_workspace', input, rejected, wrap, signal).then(
-      () => false,
-      () => true,
-    );
-    if (!denied) throw new Error('A declined Windows path was opened.');
-    await updateWorkspacePolicy({ ...DEFAULT_WORKSPACE_POLICY, access: 'full' });
-    const hello = await nativeRequest<{ version: number }>({ op: 'hello' }, signal);
-    const listing = await fileAction('browse_workspace', input, approval, wrap, signal);
-    if (hello.version !== 1 || !listing.text.includes('original.txt'))
-      throw new Error('The fixture did not appear in the folder.');
-    if (!(await read(source)).text.includes(original)) throw new Error('The expected text was not read.');
-    const collision = await fileAction(
-      'save_workspace_file',
-      { ...input, path: source, content: 'Segunda versión.' },
-      approval,
-      wrap,
-      signal,
-    );
-    if (!collision.text.includes('original (') || !(await read(source)).text.includes(original))
-      throw new Error('The original file changed.');
-    const copied = await fileAction(
-      'copy_workspace_file',
-      { ...input, path: directory + '\\Enviados\\copia.txt', sourceId: 'workspace:windows:' + source },
-      approval,
-      wrap,
-      signal,
-    );
-    if (
-      !copied.text.includes('copia.txt') ||
-      !(await read(directory + '\\Enviados\\copia.txt')).text.includes(original)
-    )
-      throw new Error('The copy is missing or differs.');
-    const attachments = [await resolveWorkspaceUpload('workspace:windows:' + source, approval, signal)];
-    const { controller } = await layer();
-    const session = controller.createSession({ capabilities: ['files'], confirm: 'never' });
-    const tab = await openTab(FIXTURE_ORIGIN + '/u-upload.html');
-    session.shareTab(tab.id!);
+    const previous = await chrome.storage.local.get(WORKSPACE_POLICY_KEY);
     try {
-      const snapshot = await session.call('snapshot', { tabId: tab.id! });
-      const ref = /\[(\w+)\][^\n]*Document/.exec(snapshot.page?.snapshot ?? snapshot.text)?.[1];
-      if (!ref) throw new Error('The fixture file input was missing.');
-      const upload = await session.call('upload', { tabId: tab.id!, target: { ref }, attachments });
-      if (!upload.ok || upload.receipt?.postcondition?.status !== 'met') throw new Error(upload.text);
-      return {
-        windows: hello.version,
-        deniedPath: denied,
-        originalPreserved: true,
-        copyVerified: true,
-        upload: upload.receipt.postcondition,
-      };
+      const signal = AbortSignal.timeout(30_000);
+      const wrap = (text: string) => text;
+      const input = { folderId: 'windows', path: directory };
+      const approval = async () => true;
+      const read = (path: string) => fileAction('read_workspace_file', { ...input, path }, approval, wrap, signal);
+      const source = directory + '\\original.txt';
+      const original = 'Contenido de prueba original.';
+      const rejected = async () => false;
+      await updateWorkspacePolicy({ ...DEFAULT_WORKSPACE_POLICY, access: 'ask' });
+      const denied = await fileAction('browse_workspace', input, rejected, wrap, signal).then(
+        () => false,
+        () => true,
+      );
+      if (!denied) throw new Error('A declined Windows path was opened.');
+      await updateWorkspacePolicy({ ...DEFAULT_WORKSPACE_POLICY, access: 'full', actions: 'auto' });
+      const hello = await nativeRequest<{ version: number }>({ op: 'hello' }, signal);
+      const listing = await fileAction('browse_workspace', input, approval, wrap, signal);
+      if (hello.version !== 1 || !listing.text.includes('original.txt'))
+        throw new Error('The fixture did not appear in the folder.');
+      if (!(await read(source)).text.includes(original)) throw new Error('The expected text was not read.');
+      const collision = await fileAction(
+        'save_workspace_file',
+        { ...input, path: source, content: 'Segunda versión.' },
+        approval,
+        wrap,
+        signal,
+      );
+      if (!collision.text.includes('original (') || !(await read(source)).text.includes(original))
+        throw new Error('The original file changed.');
+      const copied = await fileAction(
+        'copy_workspace_file',
+        { ...input, path: directory + '\\Enviados\\copia.txt', sourceId: 'workspace:windows:' + source },
+        approval,
+        wrap,
+        signal,
+      );
+      const written = JSON.parse(copied.text.split('\n').at(-1) ?? '{}') as { path?: string };
+      if (!written.path?.startsWith(directory + '\\Enviados\\') || !(await read(written.path)).text.includes(original))
+        throw new Error('The copy is missing or differs.');
+      const attachments = [await resolveWorkspaceUpload('workspace:windows:' + source, approval, signal)];
+      const { controller } = await layer();
+      const session = controller.createSession({ capabilities: ['files'], confirm: 'never' });
+      const tab = await openTab(FIXTURE_ORIGIN + '/u-upload.html');
+      session.shareTab(tab.id!);
+      try {
+        const snapshot = await session.call('snapshot', { tabId: tab.id! });
+        const ref = /\[(\w+)\][^\n]*Document/.exec(snapshot.page?.snapshot ?? snapshot.text)?.[1];
+        if (!ref) throw new Error('The fixture file input was missing.');
+        const upload = await session.call('upload', { tabId: tab.id!, target: { ref }, attachments });
+        if (!upload.ok || upload.receipt?.postcondition?.status !== 'met') throw new Error(upload.text);
+        return {
+          windows: hello.version,
+          deniedPath: denied,
+          originalPreserved: true,
+          copyVerified: true,
+          upload: upload.receipt.postcondition,
+        };
+      } finally {
+        await controller.closeSession(session);
+        await chrome.tabs.remove(tab.id!);
+      }
     } finally {
-      await controller.closeSession(session);
-      await chrome.tabs.remove(tab.id!);
+      if (WORKSPACE_POLICY_KEY in previous) await chrome.storage.local.set(previous);
+      else await chrome.storage.local.remove(WORKSPACE_POLICY_KEY);
     }
   },
 });
