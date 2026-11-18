@@ -1,0 +1,14 @@
+{
+  "google-ads": {
+    "executable": "C:\\Ruta\\Aplicaciones\\pipx.exe",
+    "arguments": "run google-ads-mcp",
+    "workingDirectory": "C:\\Ruta\\Aplicaciones",
+    "environment": {}
+  },
+  "hindsight": {
+    "executable": "C:\\Ruta\\Aplicaciones\\hindsight-mcp-server.exe",
+    "arguments": "--api-url http://localhost:8888",
+    "workingDirectory": "C:\\Ruta\\Aplicaciones",
+    "environment": {}
+  }
+}

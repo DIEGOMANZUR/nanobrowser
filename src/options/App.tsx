@@ -12,13 +12,15 @@ import { ShortcutsSection } from './ShortcutsSection';
 import { MemorySection } from './MemorySection';
 import { DataSection } from './DataSection';
 import { AboutSection } from './AboutSection';
+import { WorkspaceSection } from './WorkspaceSection';
 import { Logo } from '@src/ui/icons';
 import { websiteUrl } from '@src/ui/links';
 
-const SECTIONS: Array<{ id: string; label: MessageKey; render: () => JSX.Element }> = [
+const SECTIONS: Array<{ id: string; label?: MessageKey; render: () => JSX.Element }> = [
   { id: 'general', label: 'settings.nav.general', render: () => <GeneralSection /> },
   { id: 'providers', label: 'settings.nav.providers', render: () => <ProvidersSection /> },
   { id: 'permissions', label: 'settings.nav.permissions', render: () => <PermissionsSection /> },
+  { id: 'workspace', render: () => <WorkspaceSection /> },
   { id: 'shortcuts', label: 'settings.nav.shortcuts', render: () => <ShortcutsSection /> },
   { id: 'memory', label: 'settings.nav.memory', render: () => <MemorySection /> },
   { id: 'data', label: 'settings.nav.data', render: () => <DataSection /> },
@@ -81,7 +83,7 @@ export function App() {
                   aria-current={s.id === section ? 'page' : undefined}
                   className={`rounded-lg px-3 py-2.5 text-left text-[15px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-nb-accent ${s.id === section ? 'bg-nb-surface text-nb-fg' : 'text-nb-fg/80 hover:bg-nb-surface/60 hover:text-nb-fg'}`}
                   onClick={() => go(s.id)}>
-                  {t(s.label)}
+                  {s.label ? t(s.label) : 'Carpetas y conectores'}
                 </button>
               </Fragment>
             ))}

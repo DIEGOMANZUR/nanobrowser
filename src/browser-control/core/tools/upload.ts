@@ -77,6 +77,7 @@ export async function upload(ctx: ToolContext, args: UploadArgs): Promise<ToolOu
   const blocking = tab.pending.find(m => m.kind !== 'file-chooser');
   if (blocking) throw new LayerError('MODAL_PENDING', `A ${blocking.kind} is open on this tab: ${blocking.detail}`);
   const count = (args.paths ?? args.attachments ?? []).length;
+  const files = args.attachments?.map(a => quote(a.name, 100)).join(', ');
 
   let input: Input;
   let gate: GateResult;
@@ -99,7 +100,7 @@ export async function upload(ctx: ToolContext, args: UploadArgs): Promise<ToolOu
     const gated = await gateTarget(
       ctx,
       await check(resolved),
-      { action: 'upload', mode: 'none', intent: args.intent, category: 'upload' },
+      { action: 'upload', mode: 'none', intent: files ? 'Files: ' + files : args.intent, category: 'upload' },
       check,
     );
     resolved = gated.state.target;
@@ -124,7 +125,7 @@ export async function upload(ctx: ToolContext, args: UploadArgs): Promise<ToolOu
       name: input.description,
       role: 'file input',
       description: input.description,
-      intent: args.intent,
+      intent: files ? 'Files: ' + files : args.intent,
       category: 'upload',
     });
     // The page may have closed its chooser while the user was asked.

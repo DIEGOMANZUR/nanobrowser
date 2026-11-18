@@ -149,6 +149,7 @@ export interface WriteQuestion {
   category: 'submit' | 'delete' | 'upload';
   site: string;
   tabId: number;
+  target?: string;
 }
 
 /**
@@ -156,7 +157,7 @@ export interface WriteQuestion {
  * site set to Ask, whose card has no "Always allow".
  */
 export interface WriteDecision {
-  decision: 'run' | 'ask';
+  decision: 'run' | 'ask' | 'block';
   by?: 'site-rule' | 'auto';
   canRemember: boolean;
 }

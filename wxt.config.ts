@@ -1,4 +1,5 @@
 import { mkdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig } from 'wxt';
 import react from '@vitejs/plugin-react-swc';
@@ -10,6 +11,7 @@ import { permissionLists } from './src/ui/manifest-permissions';
 // product's lists (WXT_PRODUCT_PERMISSIONS), to check the features without them.
 const autorun = !!process.env.WXT_AUTORUN_URL;
 const productPermissions = !autorun || !!process.env.WXT_PRODUCT_PERMISSIONS;
+const googleClientId = process.env.NANOBROWSER_GOOGLE_CLIENT_ID?.trim();
 
 export default defineConfig({
   imports: false,
@@ -21,16 +23,37 @@ export default defineConfig({
   },
   manifest: {
     // The name, description and the strings Chrome shows itself follow Chrome's language (public/_locales).
-    name: '__MSG_extName__',
+    name: 'Nanobrowser Workspace',
+    key: readFileSync(new URL('./native/extension-public-key.txt', import.meta.url), 'utf8').trim(),
     description: '__MSG_extDescription__',
     default_locale: 'en',
     minimum_chrome_version: '125',
     host_permissions: ['<all_urls>'],
     ...permissionLists(productPermissions ? 'product' : 'autorun'),
+    ...(productPermissions
+      ? { optional_permissions: [...permissionLists('product').optional_permissions, 'nativeMessaging' as const] }
+      : { permissions: [...permissionLists('autorun').permissions, 'nativeMessaging' as const] }),
+    ...(googleClientId && {
+      oauth2: { client_id: googleClientId, scopes: ['https://www.googleapis.com/auth/userinfo.email'] },
+      permissions: [
+        ...permissionLists(productPermissions ? 'product' : 'autorun').permissions,
+        'identity' as const,
+        ...(!productPermissions ? ['nativeMessaging' as const] : []),
+      ],
+    }),
     action: { default_icon: 'icon-32.png', default_title: '__MSG_actionTitle__' },
     icons: { 128: 'icon-128.png' },
     commands: {
       'open-panel': { suggested_key: { default: 'Alt+Shift+N' }, description: '__MSG_commandOpenPanel__' },
+      'open-activity': {
+        suggested_key: { default: 'Alt+Shift+H' },
+        description: 'Open Nanobrowser Workspace activity',
+      },
+      'open-activity-window': {
+        suggested_key: { default: 'Ctrl+Shift+8' },
+        global: true,
+        description: 'Open activity from the desktop',
+      },
       'open-test-panel': { description: 'Open the browser control test panel (developers)' },
     },
   },

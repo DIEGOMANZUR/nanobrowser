@@ -23,6 +23,7 @@ import './panel-attach';
 import './panel-screenshot-tab';
 import './upload-measure';
 import './save-file';
+import './workspace';
 import './optional-permissions';
 import './voice';
 import './panel-selection';

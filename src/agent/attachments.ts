@@ -4,6 +4,7 @@
 import { quote, siteOf } from '@src/browser-control';
 import { getBlob } from '@src/store/conversations';
 import { attachmentKind } from '@src/store/attachments';
+import { encodeBase64 } from '@src/store/base64';
 import type { MessagePart, StoredBlob } from '@src/store/types';
 import { note } from './records';
 import type { AgentTool } from './tools';
@@ -19,11 +20,8 @@ export function inlineBudget(contextWindow: number): number {
   return Math.max(4_000, Math.min(60_000, Math.floor(contextWindow * 4 * 0.25)));
 }
 
-async function base64(blob: Blob): Promise<string> {
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(binary);
+export async function base64(blob: Blob): Promise<string> {
+  return encodeBase64(new Uint8Array(await blob.arrayBuffer()));
 }
 
 export type Wrap = (text: string, source: { attachment: string }) => string;
@@ -165,14 +163,27 @@ export async function readAttachment(
 export async function attachmentBytes(
   ids: unknown,
   conversationId: string,
+  resolveWorkspace?: (id: string) => Promise<{ name: string; mimeType: string; base64: string }>,
 ): Promise<{ files: Array<{ name: string; mimeType: string; base64: string }> } | { error: string }> {
-  if (!Array.isArray(ids) || !ids.length) return { error: 'Give the ids of attached files in attachmentIds.' };
+  if (!Array.isArray(ids) || !ids.length || ids.length > 20) return { error: 'Give between 1 and 20 file ids.' };
   const files = [];
+  let encodedBytes = 0;
   for (const id of ids) {
-    const blob = typeof id === 'string' ? await getBlob(id) : undefined;
-    if (!blob || blob.conversationId !== conversationId)
-      return { error: `No attached file with id ${quote(String(id), 80)} in this conversation.` };
-    files.push({ name: blob.name, mimeType: blob.mimeType, base64: await base64(blob.data) });
+    if (typeof id === 'string' && id.startsWith('workspace:') && resolveWorkspace) {
+      try {
+        files.push(await resolveWorkspace(id));
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : 'The workspace file could not be opened.' };
+      }
+    } else {
+      const blob = typeof id === 'string' ? await getBlob(id) : undefined;
+      if (!blob || blob.conversationId !== conversationId) return { error: 'No such attachment in this conversation.' };
+      files.push({ name: blob.name, mimeType: blob.mimeType, base64: await base64(blob.data) });
+    }
+    encodedBytes += files[files.length - 1].base64.length;
+    if (resolveWorkspace && encodedBytes > Math.ceil((25 * 1024 * 1024) / 3) * 4) {
+      return { error: 'This upload exceeds the combined 25 MiB limit.' };
+    }
   }
   return { files };
 }

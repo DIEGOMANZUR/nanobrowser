@@ -49,7 +49,7 @@ import { PageBorder, injectBorder, listenForBorder } from './border';
 import { addPromptRoute, controllerReady } from './layer';
 import { Permissions } from './permissions';
 import { PromptBroker } from './prompt-broker';
-import { notifyFinished, notifyNeeds } from './notify';
+import { notifyFinished, notifyNeeds, notifyProgress } from './notify';
 import { thumbnail } from './thumbnail';
 import { isNumberedCopy, saveText } from './downloads';
 import { checkSave } from '@src/agent/save-file';
@@ -67,6 +67,10 @@ import type { Sink } from './journal';
 import { livePair, ModelUnavailable, resolveModel } from './models';
 import { count, deleteKeepingChoices, noteActivity, observe, runEnded, runModel, runStarted } from './analytics';
 import { endOf } from './analytics-payload';
+import { CONNECTOR_TOOLS, WORKSPACE_TOOLS } from '@src/agent/workspace-tools';
+import { workspacePolicy } from '@src/store/workspace';
+import { actionDecision, fileAction, resolveWorkspaceUpload } from './workspace-actions';
+import { connectorAction } from './connectors';
 
 export interface PanelConnection {
   tabId: number | null;
@@ -273,7 +277,12 @@ export class RunManager {
     const controller = await controllerReady;
     await this.permissions.ready();
     const session = createAgentSession(controller, {
-      decideWrite: question => this.permissions.decide(this.#modes.get(conversationId) ?? 'ask', question),
+      decideWrite: async question =>
+        actionDecision(
+          await workspacePolicy(),
+          question,
+          this.permissions.decide(this.#modes.get(conversationId) ?? 'ask', question),
+        ),
       urlPolicy: { allow: [], deny: [], blocked: this.permissions.blockedSites() },
       // The watching rule: a tab becomes visible only while the user is on the conversation's tabs.
       reveal: () => this.scope.watching(conversationId),
@@ -1003,14 +1012,37 @@ export class RunManager {
     call: ToolCallRequest,
     signal: AbortSignal,
   ): Promise<{ text: string; isError: boolean }> {
-    if (call.toolName !== 'save_file') return { text: `error: ${call.toolName} is not available.`, isError: true };
     const args = (call.input ?? {}) as Record<string, unknown>;
+    if (call.toolName !== 'save_file') {
+      const session = this.#sessions.get(conversationId);
+      if (!session) return { text: 'This conversation has no active session.', isError: true };
+      const wrap = layerPort(session).wrap;
+      const approve = (title: string, detail: string, requestSignal: AbortSignal) =>
+        this.#approveWorkspace(conversationId, title, detail, requestSignal);
+      try {
+        if (WORKSPACE_TOOLS.some(t => t.name === call.toolName))
+          return await fileAction(call.toolName, args, approve, wrap, signal);
+        if (CONNECTOR_TOOLS.some(t => t.name === call.toolName))
+          return await connectorAction(call.toolName, args, approve, wrap, signal);
+      } catch (error) {
+        return {
+          text: 'Workspace error: ' + wrap(String(error).slice(0, 400), { attachment: 'workspace error' }),
+          isError: true,
+        };
+      }
+      return { text: 'Unknown workspace operation.', isError: true };
+    }
     const check = checkSave(args);
     if (!check.ok) return { text: `error INVALID_ARGUMENT (nothing saved)\n${check.reason}`, isError: true };
     const content = String(args.content);
     let saveAs = false;
     const canSave = () => chrome.permissions.contains({ permissions: ['downloads'] }).catch(() => false);
-    if ((this.#modes.get(conversationId) ?? 'ask') === 'ask' || !(await canSave())) {
+    const policy = await workspacePolicy();
+    if (
+      (policy.actions === 'groups' && policy.files) ||
+      (policy.actions === 'chat' && (this.#modes.get(conversationId) ?? 'ask') === 'ask') ||
+      !(await canSave())
+    ) {
       const answer = await this.broker.open<'save' | 'save-as' | 'discard'>(
         conversationId,
         'save-file',
@@ -1076,6 +1108,11 @@ export class RunManager {
    * that ends with the capture. It becomes an image attachment for the next message. A tab a working run holds is not
    * captured.
    */
+  async #approveWorkspace(conversationId: string, title: string, detail: string, signal: AbortSignal) {
+    const approved = await this.broker.open(conversationId, 'workspace', { title, detail }, signal);
+    return approved === 'approve';
+  }
+
   async #screenshotTab(connection: PanelConnection, tabId: number, conversationId: string | null): Promise<void> {
     const say = (message: string) => this.journal.direct(conversationId, connection.sink, { type: 'error', message });
     const owner = await this.scope.conversationOf(tabId);
@@ -1299,7 +1336,11 @@ export class RunManager {
         this.#modes.set(conversationId, conversation.mode);
         const session = await this.#openSession(conversationId);
         record.tabs = session.tabIds();
-        const tools = toolsForRun({ vision: model.profile.vision });
+        const workspaceSettings = await workspacePolicy();
+        const tools = toolsForRun({
+          vision: model.profile.vision,
+          agentTools: [...WORKSPACE_TOOLS, ...CONNECTOR_TOOLS],
+        });
         const loop = new AgentLoop({
           conversationId,
           runId,
@@ -1316,7 +1357,24 @@ export class RunManager {
           host: this.#host(conversationId, session),
           signal: controller.signal,
           emit: event => this.emit(conversationId, event),
-          turnCap: settings.turnCap,
+          turnCap: workspaceSettings.unlimited ? Infinity : settings.turnCap,
+          resolveWorkspaceUpload: (id, signal) =>
+            resolveWorkspaceUpload(
+              id,
+              (title, detail, requestSignal) => this.#approveWorkspace(conversationId, title, detail, requestSignal),
+              signal,
+            ),
+          onAction: workspaceSettings.unlimited
+            ? async () => {
+                const completedActions = (record.workspaceActions =
+                  (record.workspaceActions ?? restore?.workspaceActions ?? 0) + 1);
+                if (completedActions % 100 !== 0) return;
+                await putRun(record);
+                const milestone = 'Tarea en curso · ' + completedActions + ' pasos registrados.';
+                await this.#notice(conversationId, milestone, 'info');
+                await notifyProgress(conversationId, completedActions, (await this.scope.tabsOf(conversationId))[0]);
+              }
+            : undefined,
           thumbnail,
           agentTool: (call, signal) => this.#agentTool(conversationId, call, signal),
           restore: restore ? { debt: restore.debt as DebtEntry[], guards: restore.guards } : undefined,

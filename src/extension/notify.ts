@@ -14,6 +14,7 @@ const NEEDS: Record<string, (site: string) => string> = {
   'ask-input': () => 'Nanobrowser has a question for you.',
   'save-file': () => 'Nanobrowser asks before it saves a file.',
   confirm: () => 'Nanobrowser has a question for you.',
+  workspace: () => 'Nanobrowser Workspace necesita tu decisión.',
 };
 
 async function siteOfTab(tabId: number | undefined): Promise<string> {
@@ -42,6 +43,10 @@ async function show(id: string, message: string, tabId: number | undefined): Pro
   await chrome.notifications
     .create(id, { type: 'basic', iconUrl: chrome.runtime.getURL('/icon-128.png'), title: 'Nanobrowser', message })
     .catch(() => undefined);
+}
+
+export async function notifyProgress(conversationId: string, count: number, tabId?: number) {
+  await show('progress-' + conversationId, 'La tarea registró ' + count + ' pasos. Sigue en ejecución.', tabId);
 }
 
 export function clearNotification(id: string): void {

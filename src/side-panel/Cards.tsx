@@ -311,6 +311,21 @@ export function Cards({ prompts, answer }: { prompts: OpenPrompt[]; answer: (id:
             return <ConfirmCard key={p.id} prompt={p} answer={reply} />;
           case 'save-file':
             return <SaveFileCard key={p.id} prompt={p} answer={reply} />;
+          case 'workspace':
+            return (
+              <div key={p.id} className="rounded-lg border border-nb-border p-3 text-sm">
+                <strong>{String(p.data.title ?? '')}</strong>
+                <p className="my-2 whitespace-pre-wrap break-all">{String(p.data.detail ?? '')}</p>
+                <Buttons>
+                  <button type="button" className={secondary} onClick={() => reply('approve')}>
+                    Permitir
+                  </button>
+                  <button type="button" className={secondary} onClick={() => reply('decline')}>
+                    Rechazar
+                  </button>
+                </Buttons>
+              </div>
+            );
           default:
             return null;
         }

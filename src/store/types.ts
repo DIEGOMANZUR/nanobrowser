@@ -222,6 +222,7 @@ export interface RunRecord {
   steering: QueuedMessage[];
   turns: number;
   usage: Usage;
+  workspaceActions?: number;
   debt: DebtItem[];
   guards: GuardState;
   /** The session's tabs, to rebuild the layer session. */

@@ -78,6 +78,11 @@ export interface LoopOptions {
   takeSteering?: () => string[];
   /** Makes a small thumbnail of a screenshot for the activity block; none when absent. */
   thumbnail?: (base64: string, mimeType: string) => Promise<string | undefined>;
+  resolveWorkspaceUpload?: (
+    id: string,
+    signal: AbortSignal,
+  ) => Promise<{ name: string; mimeType: string; base64: string }>;
+  onAction?: () => Promise<void>;
   /** Runs an agent tool (read_attachment, save_file); `done` is the loop's own. */
   agentTool?: (
     call: ToolCallRequest,
@@ -991,6 +996,7 @@ export class AgentLoop {
       messageId: this.#replyId,
       row: this.#row(outcome.call, status, outcome),
     });
+    if (!outcome.skipped && outcome.kind !== 'control') await this.options.onAction?.();
   }
 
   /** Runs a reply's calls under the execution policy; every call gets a result. */
@@ -1088,7 +1094,12 @@ export class AgentLoop {
     } else if (call.toolName === 'upload') {
       // The model names attached files by id; the wrapper turns them into bytes for the layer.
       const { attachmentIds, ...rest } = args;
-      const files = await attachmentBytes(attachmentIds, this.options.conversationId);
+      const resolve = this.options.resolveWorkspaceUpload;
+      const files = await attachmentBytes(
+        attachmentIds,
+        this.options.conversationId,
+        resolve ? id => resolve(id, signal) : undefined,
+      );
       if ('error' in files) {
         outcome = { call, kind, text: `error NOT_FOUND (nothing dispatched)\n${files.error}`, isError: true };
       } else {

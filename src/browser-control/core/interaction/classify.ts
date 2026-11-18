@@ -56,6 +56,11 @@ export const DELETE_WORDS = vocabulary(
     'cancel membership',
     'cancel order',
     'close account',
+    'borrar',
+    'eliminar',
+    'mover a la papelera',
+    'vaciar papelera',
+    'descartar',
   ],
   ['删除', '移除', '清空', '注销', '取消订阅'],
 );
@@ -74,6 +79,9 @@ export const SUBMIT_WORDS = vocabulary(
     'create',
     'approve',
     'reject',
+    'enviar',
+    'publicar',
+    'guardar',
   ],
   ['提交', '发送', '发布', '确认', '保存', '更新', '创建', '批准', '拒绝', '驳回'],
 );
@@ -100,7 +108,7 @@ function onConsentPage(url: string | undefined): boolean {
 /** A generic confirmation label: pay when a money amount is next to it. */
 export const GENERIC_CONFIRM =
   /^(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes|确认|确定|继续|下一步)(?:\b|$)/i;
-const DELETE_CLASSES = /(^|[\s_-])(delete|remove|destroy|trash|discard)([\s_-]|$)/i;
+const DELETE_CLASSES = /(^|[\s_-])(delete|remove|destroy|trash|discard|eliminar|borrar|papelera)([\s_-]|$)/i;
 
 export interface ClassifyInput {
   /** activate: a click, or Enter/Space on a focused button or link; enter: Enter in a field or submit:true. */

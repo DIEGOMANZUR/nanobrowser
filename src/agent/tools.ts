@@ -54,7 +54,7 @@ const ATTACHMENT_IDS = {
   items: { type: 'string' },
   minItems: 1,
   maxItems: 20,
-  description: 'Ids of files the user attached to this conversation, as the note about the attached files lists them',
+  description: 'Ids of files attached to this conversation or uploadId values from browse_workspace',
 };
 
 function withAttachmentIds(schema: unknown): unknown {
@@ -134,7 +134,18 @@ export function kindOf(tool: string, args: Record<string, unknown>): ToolKind {
   if (tool === 'done' || tool === 'ask_user') return 'control';
   if (tool === 'wait') return 'wait';
   if (tool === 'save_file') return 'state';
-  if (tool === 'read_attachment') return 'read';
+  if (
+    [
+      'read_attachment',
+      'list_workspace_folders',
+      'browse_workspace',
+      'read_workspace_file',
+      'list_connectors',
+      'describe_connector',
+    ].includes(tool)
+  )
+    return 'read';
+  if (tool === 'save_workspace_file' || tool === 'copy_workspace_file') return 'state';
   if (tool === 'tabs') return args.action === 'list' ? 'read' : 'mutate';
   const spec = TOOL_SPECS.find(s => s.name === tool);
   if (!spec) return 'mutate';

@@ -1,5 +1,14 @@
 # AGENTS.md
 
+## Nanobrowser Workspace fork
+
+- The local development branch is `archivos-y-conectores`. The original repository is the `upstream` remote. The Workspace changes below supersede the upstream scope exclusions for local files and Model Context Protocol (MCP).
+- The user authorized adding information and expressly excluded deleting files or data. The Windows companion creates or copies with exclusive creation and uses a distinct destination name on collision. The browser layer blocks recognized destructive actions. Keep file authorization separate from action approval.
+- The Workspace agent tools are defined in `src/agent/workspace-tools.ts`. Chrome-specific dispatch lives in `src/extension/workspace-actions.ts` and `src/extension/connectors.ts`. Register the Windows helper with `native/windows/install.ps1`. Keep the extension's public key stable because the registered host allows only that extension identity.
+- Remote tools are enabled individually. Use trusted read-only service scopes for generic connectors and known additive operations for built-in connectors. Only user-installed local executables configured outside the extension can be launched by the native host. Never let a model supply an executable path, choose process arguments, see stored access tokens or select arbitrary browser script.
+- Record each tool execution separately from model reasoning. Keep step reporting based on receipts and distinguish file selection from portal acceptance.
+- Use isolated fixture files and fake accounts for automated tests. Keep personal files, service configuration, credentials and generated browser profiles out of Git. Usage and setup are in `docs/WORKSPACE.md`.
+
 This file provides guidance to AI coding assistants (e.g., Claude Code, GitHub Copilot, Cursor) when working with this repository.
 
 ## Project Overview

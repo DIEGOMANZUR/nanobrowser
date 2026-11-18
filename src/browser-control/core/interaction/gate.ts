@@ -201,7 +201,10 @@ export async function confirmGate(ctx: ToolContext, input: GateInput): Promise<G
   // test panel.
   let canRemember = category === 'submit';
   if (session.decideWrite && (category === 'submit' || category === 'delete' || category === 'upload')) {
-    const decision = await session.decideWrite({ category, site, tabId: ctx.tab().tabId });
+    const decision = await session.decideWrite({ category, site, tabId: ctx.tab().tabId, target: input.description });
+    if (decision.decision === 'block') {
+      throw new LayerError('CAPABILITY_DISABLED', 'Deletion is disabled for this agent.');
+    }
     if (decision.decision === 'run') {
       return { category, confirmedByUser: false, prompted: false, reason, basis, allowedBy: decision.by ?? 'auto' };
     }
