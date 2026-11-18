@@ -1,10 +1,54 @@
 import { fileAction, resolveWorkspaceUpload } from '@src/extension/workspace-actions';
+import { getEntries, getRun, listConversations } from '@src/store/conversations';
 import { nativeRequest } from '@src/store/native-workspace';
 import { DEFAULT_WORKSPACE_POLICY, updateWorkspacePolicy } from '@src/store/workspace';
 import { FIXTURE_ORIGIN } from '../fixtures-config';
 import { defineCheck } from './registry';
 import { layer } from '../layer';
 import { openTab } from '../tabs';
+import { openPanelTab, panel, scriptReplies, seedFixtureModel, waitForText } from './panel-chat';
+
+defineCheck({
+  name: 'workspace-milestone',
+  title: 'Workspace milestone in a live run',
+  description:
+    'Runs 101 tools from the side panel with the regular run cap set to one and checks the recorded milestone.',
+  async run() {
+    await seedFixtureModel();
+    const storage = await chrome.storage.local.get('nb.settings');
+    await chrome.storage.local.set({ 'nb.settings': { ...(storage['nb.settings'] as object), turnCap: 1 } });
+    await updateWorkspacePolicy({ ...DEFAULT_WORKSPACE_POLICY, unlimited: true });
+    await scriptReplies([
+      ...Array.from({ length: 101 }, () => ({ toolCalls: [{ name: 'list_workspace_folders', input: {} }] })),
+      { text: 'Finished the 101 operations.' },
+    ]);
+    const tab = await openPanelTab();
+    try {
+      const message = 'Run the Workspace milestone test';
+      await panel(tab.id!, 'type-send', { text: message });
+      await waitForText(tab.id!, 'Finished the 101 operations.', 60_000);
+      const [conversation] = await listConversations(message);
+      if (!conversation) throw new Error('The Workspace fixture conversation is missing.');
+      const entries = await getEntries(conversation.id);
+      const notices = entries.filter(
+        e => e.type === 'ui' && e.kind === 'notice' && JSON.stringify(e.data).includes('100 pasos registrados'),
+      );
+      const steps = entries
+        .flatMap(e => (e.type === 'message' ? e.message.parts : []))
+        .filter(p => p.type === 'tool-result' && p.toolName === 'list_workspace_folders' && !p.isError);
+      const record = await getRun(conversation.id);
+      if (notices.length !== 1 || steps.length !== 101 || record?.workspaceActions !== 101) {
+        throw new Error(
+          'Unexpected activity count: ' +
+            JSON.stringify({ notices: notices.length, steps: steps.length, stored: record?.workspaceActions }),
+        );
+      }
+      return { steps: steps.length, milestone: 100, notices: notices.length };
+    } finally {
+      await chrome.tabs.remove(tab.id!);
+    }
+  },
+});
 
 defineCheck({
   name: 'workspace-windows',
