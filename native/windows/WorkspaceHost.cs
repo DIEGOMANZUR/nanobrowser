@@ -16,6 +16,7 @@ internal static class WorkspaceHost
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
     private static Process server;
     private static string serverId;
+    private static DesktopControl desktop;
     private static readonly string HostDirectory = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory).TrimEnd('\\');
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -34,7 +35,7 @@ internal static class WorkspaceHost
             {
                 int length;
                 try { length = input.ReadInt32(); }
-                catch (EndOfStreamException) { CloseServer(); return; }
+                catch (EndOfStreamException) { CloseServer(); if (desktop != null) desktop.Dispose(); return; }
                 if (length < 1 || length > 22 * 1024 * 1024) return;
                 var bytes = input.ReadBytes(length);
                 if (bytes.Length != length) return;
@@ -62,7 +63,7 @@ internal static class WorkspaceHost
     {
         switch (StringArg(request, "op"))
         {
-            case "hello": return new { version = 1 };
+            case "hello": return new { version = 1, desktop = true };
             case "roots": return Roots();
             case "list": return Browse(PathArg(request), StringArg(request, "query"), NumberArg(request, "offset"));
             case "chunk": return ReadChunk(PathArg(request), NumberArg(request, "offset"));
@@ -70,8 +71,24 @@ internal static class WorkspaceHost
             case "copy": return Copy(PathArg(request, "source"), PathArg(request));
             case "mcp": return Exchange(StringArg(request, "server"), StringArg(request, "message"));
             case "mcp-close": CloseServer(); return true;
+            case "desktop-windows": return Desktop().List();
+            case "desktop-snapshot": return Desktop().Snapshot(RequiredString(request, "windowId"));
+            case "desktop-act": return Desktop().Act(RequiredString(request, "snapshotId"), RequiredString(request, "action"),
+                SignedNumber(request, "x"), SignedNumber(request, "y"), SignedNumber(request, "scroll"), StringArg(request, "text"), StringArg(request, "key"));
             default: throw new ArgumentException("The Windows companion does not support this operation.");
         }
+    }
+
+    private static DesktopControl Desktop()
+    {
+        if (desktop == null) { DesktopControl.SetDpiAwareness(); desktop = new DesktopControl(); }
+        return desktop;
+    }
+
+    private static int SignedNumber(Dictionary<string, object> request, string key)
+    {
+        object value;
+        return request.TryGetValue(key, out value) && value is int ? (int)value : Int32.MinValue;
     }
 
     private static void CloseServer()

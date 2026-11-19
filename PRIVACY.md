@@ -30,6 +30,8 @@ When you remove Nanobrowser, Chrome opens a short optional Google Form that asks
 
 In the Workspace fork, a requested file read sends the selected text to the configured model. Authorized folder names and lookup results may also appear in that task's context. File bytes used for a web upload go to the destination page. Connected services receive the arguments for tools the user enabled and the credentials configured for that service. Connector credentials and folder handles are stored locally and stay out of conversation exports. The activity panel reads actions from the local conversation history.
 
+When Windows visual control is enabled, the agent can see eligible application window titles. Approved window captures are sent to the configured model and retained with the conversation. Imported skill packages are stored locally. The configured model receives the parts of enabled skills that it looks up during the task.
+
 To work, Nanobrowser sends data directly from your browser to the AI providers you set up, and only to them:
 
 - **Your model provider** (for example Anthropic, OpenAI, Google, OpenRouter, or a local server such as Ollama): your messages, your attachments, the content of the tabs the agent works in, and, for models that can see images, screenshots of those tabs.

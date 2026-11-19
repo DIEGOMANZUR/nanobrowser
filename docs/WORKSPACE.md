@@ -42,3 +42,18 @@ En **Permisos de acción**, activa **Sin límite fijo de pasos, con aviso cada 1
 - **Alt + Mayús + H** abre **Historial de acciones** como panel lateral en la pestaña actual.
 - **Control + Mayús + 8** abre una ventana de actividad desde el escritorio mientras Chrome o Edge sigue ejecutándose. Si el atajo está ocupado, revísalo en la página de atajos de extensiones del navegador.
 - Cada fila del historial representa una operación y muestra la hora y el resultado conocido. El panel permite cambiar de tarea y consultar acciones anteriores.
+
+## Habilidades
+
+En **Ajustes → Habilidades**, pulsa **Importar SKILL.md** para un archivo suelto o **Importar carpeta** para un paquete. La carpeta debe tener `SKILL.md` en la raíz. Puedes incluir referencias de texto en `references/` o `assets/`. Revisa las instrucciones, pulsa **Guardar habilidad** y marca su casilla para habilitarla.
+
+Desde la siguiente tarea, el agente puede consultar las habilidades habilitadas según el pedido. Si una habilidad declara `disable-model-invocation: true`, escribe `/nombre-de-la-habilidad` en el mensaje inicial. La biblioteca conserva instrucciones y referencias de texto. Los programas y archivos binarios del paquete quedan fuera de la importación.
+
+## Control visual de Windows
+
+1. Actualiza el componente con `pwsh -NoProfile -File native/windows/install.ps1` y recarga la extensión en el navegador.
+2. En **Ajustes → Carpetas y conectores**, pulsa **Conectar componente de Windows** y activa **Permitir el control visual en nuevas tareas**. Selecciona un modelo que admita imágenes.
+3. Abre la aplicación que quieras usar. Desde el chat inicia una tarea que nombre esa aplicación. La primera tarjeta te pide permiso para compartir con el modelo las capturas de esa ventana. Después se confirma cada clic, desplazamiento o entrada de teclado.
+4. Si Windows mantiene otra aplicación al frente después de una aprobación, cambia a la ventana autorizada en ese momento. Mantén la ventana entera en un solo monitor. Si cambian el control, la posición o el foco esperado, el agente debe observar otra vez.
+
+El control visual trabaja con ventanas normales del usuario. El agente puede clicar, desplazarse, insertar texto en campos compatibles y usar teclas de navegación. El navegador se opera con las herramientas web existentes. El escritorio seguro, los controles de contraseña y las consolas quedan fuera del control visual. La actividad registra el envío de la entrada y el agente usa otra captura para comprobar el efecto.

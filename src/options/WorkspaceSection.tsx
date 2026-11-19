@@ -28,6 +28,7 @@ export function WorkspaceSection() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const [windowsReady, setWindowsReady] = useState(false);
+  const [desktopReady, setDesktopReady] = useState(false);
   const [allowFull, setAllowFull] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const kind = draft.kind ?? 'mcp';
@@ -46,8 +47,11 @@ export function WorkspaceSection() {
       .catch(error => setStatus(String(error)));
     void chrome.permissions.contains({ permissions: ['nativeMessaging'] }).then(granted => {
       if (granted)
-        void nativeRequest({ op: 'hello' })
-          .then(() => setWindowsReady(true))
+        void nativeRequest<{ desktop?: boolean }>({ op: 'hello' })
+          .then(response => {
+            setWindowsReady(true);
+            setDesktopReady(response.desktop === true);
+          })
           .catch(() => undefined);
     });
     const changed: Parameters<typeof chrome.storage.onChanged.addListener>[0] = (changes, area) => {
@@ -104,8 +108,9 @@ export function WorkspaceSection() {
     perform(async () => {
       if (!(await chrome.permissions.request({ permissions: ['nativeMessaging'] })))
         throw new Error('Permiso de Windows rechazado.');
-      await nativeRequest({ op: 'hello' });
+      const response = await nativeRequest<{ desktop?: boolean }>({ op: 'hello' });
       setWindowsReady(true);
+      setDesktopReady(response.desktop === true);
       setStatus('Componente de Windows conectado.');
     });
   const editConnector = (connector: Connector) => {
@@ -304,6 +309,28 @@ export function WorkspaceSection() {
           Alt + Mayús + H abre el historial en el navegador. Control + Mayús + 8 abre una ventana de actividad mientras
           el navegador esté en ejecución.
         </p>
+      </SettingsCard>
+
+      <SettingsCard title="Control visual de Windows" className="flex flex-col gap-3">
+        <label className="text-sm">
+          <input
+            type="checkbox"
+            checked={policy.desktop}
+            disabled={busy || !loaded || (!desktopReady && !policy.desktop)}
+            onChange={event => {
+              const desktop = event.target.checked;
+              void perform(() => change({ desktop }));
+            }}
+          />{' '}
+          Permitir el control visual en nuevas tareas
+        </label>
+        <p className="text-sm text-nb-fg/70">
+          Requiere el componente de Windows y un modelo que admita imágenes. Apruebas la ventana antes de compartir su
+          captura y confirmas cada entrada de ratón o teclado.
+        </p>
+        {windowsReady && !desktopReady && (
+          <p className="text-sm">Actualiza el componente de Windows para usar esta función.</p>
+        )}
       </SettingsCard>
 
       <SettingsCard title="Conectores" className="flex flex-col gap-4">

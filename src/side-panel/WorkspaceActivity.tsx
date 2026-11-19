@@ -81,6 +81,11 @@ const labels: Record<string, string> = {
   list_connectors: 'Ver conectores',
   call_connector: 'Usar conector',
   describe_connector: 'Consultar herramientas del conector',
+  list_skills: 'Consultar habilidades',
+  read_skill: 'Leer habilidad',
+  desktop_windows: 'Enumerar ventanas de Windows',
+  desktop_snapshot: 'Capturar ventana de Windows',
+  desktop_act: 'Enviar entrada a Windows',
 };
 
 const outcomes: Record<Step['state'], string> = {

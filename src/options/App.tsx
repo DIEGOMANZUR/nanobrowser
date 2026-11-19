@@ -13,6 +13,7 @@ import { MemorySection } from './MemorySection';
 import { DataSection } from './DataSection';
 import { AboutSection } from './AboutSection';
 import { WorkspaceSection } from './WorkspaceSection';
+import { SkillsSection } from './SkillsSection';
 import { Logo } from '@src/ui/icons';
 import { websiteUrl } from '@src/ui/links';
 
@@ -21,6 +22,7 @@ const SECTIONS: Array<{ id: string; label?: MessageKey; render: () => JSX.Elemen
   { id: 'providers', label: 'settings.nav.providers', render: () => <ProvidersSection /> },
   { id: 'permissions', label: 'settings.nav.permissions', render: () => <PermissionsSection /> },
   { id: 'workspace', render: () => <WorkspaceSection /> },
+  { id: 'skills', render: () => <SkillsSection /> },
   { id: 'shortcuts', label: 'settings.nav.shortcuts', render: () => <ShortcutsSection /> },
   { id: 'memory', label: 'settings.nav.memory', render: () => <MemorySection /> },
   { id: 'data', label: 'settings.nav.data', render: () => <DataSection /> },
@@ -83,7 +85,7 @@ export function App() {
                   aria-current={s.id === section ? 'page' : undefined}
                   className={`rounded-lg px-3 py-2.5 text-left text-[15px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-nb-accent ${s.id === section ? 'bg-nb-surface text-nb-fg' : 'text-nb-fg/80 hover:bg-nb-surface/60 hover:text-nb-fg'}`}
                   onClick={() => go(s.id)}>
-                  {s.label ? t(s.label) : 'Carpetas y conectores'}
+                  {s.label ? t(s.label) : s.id === 'skills' ? 'Habilidades' : 'Carpetas y conectores'}
                 </button>
               </Fragment>
             ))}

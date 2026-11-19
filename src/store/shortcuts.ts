@@ -84,7 +84,7 @@ function unquote(raw: string): string {
 }
 
 function parseYaml(lines: string[]): Yaml {
-  const root: Yaml = {};
+  const root: Yaml = Object.create(null) as Yaml;
   const stack: Array<{ indent: number; map: Yaml }> = [{ indent: -1, map: root }];
   for (const line of lines) {
     if (!line.trim() || line.trim().startsWith('#')) continue;
@@ -95,7 +95,7 @@ function parseYaml(lines: string[]): Yaml {
     const parent = stack.at(-1)!.map;
     const [, key, rest] = match;
     if (rest.trim() === '' || rest.trim().startsWith('#')) {
-      const child: Yaml = {};
+      const child: Yaml = Object.create(null) as Yaml;
       parent[key] = child;
       stack.push({ indent, map: child });
     } else {

@@ -6,7 +6,9 @@ $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
 $nativeOut = Join-Path $env:LOCALAPPDATA 'NanobrowserWorkspace/NativeHost'
 New-Item -Path $nativeOut -ItemType Directory -Force | Out-Null
 $hostPath = Join-Path $nativeOut 'WorkspaceHost.exe'
-& $compiler /nologo /target:exe /optimize+ /reference:System.Web.Extensions.dll "/out:$hostPath" (Join-Path $PSScriptRoot 'WorkspaceHost.cs')
+$presentation = Join-Path (Split-Path $compiler) 'WPF'
+$references = @('WindowsBase.dll', 'UIAutomationClient.dll', 'UIAutomationTypes.dll') | ForEach-Object { '/reference:' + (Join-Path $presentation $_) }
+& $compiler /nologo /target:exe /optimize+ /reference:System.Web.Extensions.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll @references "/out:$hostPath" (Join-Path $PSScriptRoot 'WorkspaceHost.cs') (Join-Path $PSScriptRoot 'DesktopControl.cs')
 if ($LASTEXITCODE -ne 0) { throw 'No se pudo compilar el componente de Windows.' }
 if ($CompileOnly) { Write-Output $hostPath; return }
 

@@ -34,6 +34,7 @@ export interface WorkspacePolicy {
   connectors: boolean;
   transfers: boolean;
   unlimited: boolean;
+  desktop: boolean;
 }
 
 export const DEFAULT_WORKSPACE_POLICY: WorkspacePolicy = {
@@ -44,6 +45,7 @@ export const DEFAULT_WORKSPACE_POLICY: WorkspacePolicy = {
   connectors: true,
   transfers: true,
   unlimited: false,
+  desktop: false,
 };
 
 export const WORKSPACE_POLICY_KEY = 'nb.workspacePolicy';
@@ -72,14 +74,35 @@ export function patchWorkspacePolicy(update: Partial<WorkspacePolicy>) {
 interface WorkspaceDb extends DBSchema {
   folders: { key: string; value: WorkspaceFolder };
   connectors: { key: string; value: Connector };
+  skills: { key: string; value: WorkspaceSkill };
+}
+
+export interface WorkspaceSkill {
+  name: string;
+  description: string;
+  instructions: string;
+  references: { path: string; text: string }[];
+  enabled: boolean;
+  manual: boolean;
 }
 
 let pending: ReturnType<typeof openDB<WorkspaceDb>> | undefined;
 function db() {
-  return (pending ??= openDB<WorkspaceDb>('nanobrowser-workspace', 1, {
-    upgrade(database) {
-      database.createObjectStore('folders', { keyPath: 'id' });
-      database.createObjectStore('connectors', { keyPath: 'id' });
+  return (pending ??= openDB<WorkspaceDb>('nanobrowser-workspace', 2, {
+    upgrade(database, oldVersion) {
+      if (oldVersion < 1) {
+        database.createObjectStore('folders', { keyPath: 'id' });
+        database.createObjectStore('connectors', { keyPath: 'id' });
+      }
+      if (oldVersion < 2) database.createObjectStore('skills', { keyPath: 'name' });
+    },
+    blocking() {
+      const previous = pending;
+      pending = undefined;
+      void previous?.then(database => database.close());
+    },
+    terminated() {
+      pending = undefined;
     },
   }));
 }
@@ -92,11 +115,21 @@ export const workspace = {
   connectors: async () => (await db()).getAll('connectors'),
   connector: async (id: string) => (await db()).get('connectors', id),
   putConnector: async (connector: Connector) => (await db()).put('connectors', connector),
+  skills: async () => (await db()).getAll('skills'),
+  skill: async (name: string) => (await db()).get('skills', name),
+  addSkill: async (skill: WorkspaceSkill) => (await db()).add('skills', skill),
+  setSkillEnabled: async (name: string, enabled: boolean) => {
+    const tx = (await db()).transaction('skills', 'readwrite');
+    const existing = await tx.store.get(name);
+    if (existing) await tx.store.put({ ...existing, enabled });
+    await tx.done;
+  },
   clear: async () => {
-    const transaction = (await db()).transaction(['folders', 'connectors'], 'readwrite');
+    const transaction = (await db()).transaction(['folders', 'connectors', 'skills'], 'readwrite');
     await Promise.all([
       transaction.objectStore('folders').clear(),
       transaction.objectStore('connectors').clear(),
+      transaction.objectStore('skills').clear(),
       transaction.done,
     ]);
   },

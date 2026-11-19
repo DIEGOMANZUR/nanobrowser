@@ -83,11 +83,12 @@ export interface LoopOptions {
     signal: AbortSignal,
   ) => Promise<{ name: string; mimeType: string; base64: string }>;
   onAction?: () => Promise<void>;
+  desktopPending?: () => boolean;
   /** Runs an agent tool (read_attachment, save_file); `done` is the loop's own. */
   agentTool?: (
     call: ToolCallRequest,
     signal: AbortSignal,
-  ) => Promise<{ text: string; isError: boolean; result?: unknown }>;
+  ) => Promise<{ text: string; isError: boolean; image?: CallOutcome['image'] }>;
 }
 
 export interface LoopEnd {
@@ -554,7 +555,7 @@ export class AgentLoop {
       if (verdict.nudge) notes.push(note(verdict.nudge));
       if (verdict.stop) this.#guardStop ??= { reason: verdict.stop, guard: verdict.guard ?? 'errors' };
     }
-    const image = await this.#withThumb(this.#screenshotImage(outcome));
+    const image = await this.#withThumb(outcome.image ?? this.#screenshotImage(outcome));
     const text = cutText(outcome.text, RESULT_CAP, `… the result was cut at ${RESULT_CAP} characters.`);
     // A nudge is the extension's own line on the result that caused it, outside any boundary.
     return { ...outcome, ...(image ? { image } : {}), text: [text, ...notes].join('\n') };
@@ -695,18 +696,32 @@ export class AgentLoop {
   async #judgeDone(call: ToolCallRequest, kind: ToolKind, args: Record<string, unknown>): Promise<CallOutcome> {
     const outcomeArg = (['success', 'partial', 'failed'] as const).find(o => o === args.outcome) ?? 'partial';
     let summary = String(args.summary ?? '');
+    const desktopPending = this.options.desktopPending?.() ?? false;
     await this.#retireLostTabs();
     const open = this.#debt.filter(d => d.state === 'open');
-    if (outcomeArg === 'success' && open.length) {
+    if (outcomeArg === 'success' && (open.length || desktopPending)) {
       this.#doneRefusals++;
+      const message = desktopPending
+        ? 'Take a fresh screenshot of the acted-on Windows window before claiming success.'
+        : refusal(open);
       if (this.#doneRefusals >= 2) {
         // Refused twice in a row: the run ends as partial, with the agent's summary.
-        return { call, kind, text: refusal(open), isError: true, done: { outcome: 'partial', summary } };
+        return {
+          call,
+          kind,
+          text: message,
+          isError: true,
+          done: {
+            outcome: 'partial',
+            summary: desktopPending ? summary + '\n\nWindows action effect unverified.' : summary,
+          },
+        };
       }
-      return { call, kind, text: refusal(open), isError: true };
+      return { call, kind, text: message, isError: true };
     }
     this.#doneRefusals = 0;
     const lost = unverifiedLines(this.#debt);
+    if (desktopPending) summary += '\n\nWindows action effect unverified.';
     if (lost.length) summary = `${summary}\n\n${lost.map(l => `- ${l}`).join('\n')}`;
     return { call, kind, text: 'done: the run ends.', isError: false, done: { outcome: outcomeArg, summary } };
   }
@@ -738,13 +753,20 @@ export class AgentLoop {
     }
     if (this.#guardStop) return this.salvage(this.#guardStop.reason, `guard_${this.#guardStop.guard}`);
     if (!reply.toolCalls.length) {
-      if (!this.#mutated) return { status: 'done', outcome: 'success', usage: this.#usage, turns: this.#turns };
+      const desktopPending = this.options.desktopPending?.() ?? false;
+      if (!this.#mutated && !desktopPending)
+        return { status: 'done', outcome: 'success', usage: this.#usage, turns: this.#turns };
       // Plain text after a mutation: one note, then partial.
       this.#plainEndings++;
       if (this.#plainEndings >= 2) {
-        return { status: 'done', outcome: 'partial', usage: this.#usage, turns: this.#turns };
+        const reason = desktopPending ? 'The Windows action effect was not verified.' : undefined;
+        return { status: 'done', outcome: 'partial', reason, usage: this.#usage, turns: this.#turns };
       }
-      await this.writer.appNote('you acted on a page in this run; finish with `done` and an honest outcome.');
+      await this.writer.appNote(
+        desktopPending
+          ? 'the Windows input still needs verification. Observe the same application window before reporting success.'
+          : 'you acted on a page in this run; finish with `done` and an honest outcome.',
+      );
       return null;
     }
     if (this.#turns >= this.options.turnCap) return this.salvage('the run reached its turn limit.', 'cap');
@@ -777,7 +799,13 @@ export class AgentLoop {
     const args = (call.input ?? {}) as Record<string, unknown>;
     const outcome: 'partial' | 'failed' = args.outcome === 'failed' ? 'failed' : 'partial';
     const lost = unverifiedLines(this.#debt);
-    const summary = [String(args.summary ?? ''), ...lost.map(l => `- ${l}`)].filter(Boolean).join('\n\n');
+    const summary = [
+      String(args.summary ?? ''),
+      ...lost.map(l => `- ${l}`),
+      this.options.desktopPending?.() ? 'Windows action effect unverified.' : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
     if (cause === 'cap') return { ...failedEnd, summary };
     return {
       status: outcome === 'failed' ? 'failed' : 'done',
@@ -1120,7 +1148,13 @@ export class AgentLoop {
       const r = this.options.agentTool
         ? await this.options.agentTool(call, signal)
         : { text: `error: ${call.toolName} is not available.`, isError: true };
-      outcome = { call, kind, text: r.text, isError: r.isError };
+      outcome = {
+        call,
+        kind,
+        text: r.text,
+        isError: r.isError,
+        ...('image' in r && r.image ? { image: r.image } : {}),
+      };
     } else {
       // Mutations return their diff; the model never sets `observe`.
       const sent = kind === 'mutate' && call.toolName !== 'tabs' ? { ...args, observe: 'diff' } : args;

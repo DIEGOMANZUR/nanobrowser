@@ -1,7 +1,7 @@
 // The RunManager: one run per active conversation, the panel commands, run records and statuses. The worker owns the
 // run; panels are views that can close and reopen.
 import { AgentLoop, REASONING_DROPPED, STOPPED_BY_USER, STOPPED_NOTE } from '@src/agent/loop';
-import type { LoopEnd } from '@src/agent/loop';
+import type { CallOutcome, LoopEnd } from '@src/agent/loop';
 import type { HostPort } from '@src/agent/ports';
 import type { Session, UserStepDetails } from '@src/browser-control';
 import { agentSystemPrompt } from '@src/agent/prompt';
@@ -72,6 +72,11 @@ import { CONNECTOR_TOOLS, WORKSPACE_TOOLS } from '@src/agent/workspace-tools';
 import { workspace, workspacePolicy, WORKSPACE_POLICY_KEY } from '@src/store/workspace';
 import { actionDecision, fileAction, resolveWorkspaceUpload } from './workspace-actions';
 import { connectorAction } from './connectors';
+import { DESKTOP_TOOLS } from '@src/agent/desktop-tools';
+import { SKILL_TOOLS } from '@src/agent/skill-tools';
+import { namedSkills } from '@src/store/skills';
+import { DesktopSession } from './desktop';
+import { runSkillTool } from './skills';
 
 export interface PanelConnection {
   tabId: number | null;
@@ -1015,7 +1020,9 @@ export class RunManager {
     conversationId: string,
     call: ToolCallRequest,
     signal: AbortSignal,
-  ): Promise<{ text: string; isError: boolean }> {
+    desktop: DesktopSession | undefined,
+    explicitSkills: ReadonlySet<string>,
+  ): Promise<{ text: string; isError: boolean; image?: CallOutcome['image'] }> {
     const args = (call.input ?? {}) as Record<string, unknown>;
     if (call.toolName !== 'save_file') {
       const session = this.#sessions.get(conversationId);
@@ -1024,6 +1031,10 @@ export class RunManager {
       const approve = (title: string, detail: string, requestSignal: AbortSignal) =>
         this.#approveWorkspace(conversationId, title, detail, requestSignal);
       try {
+        if (desktop && DESKTOP_TOOLS.some(t => t.name === call.toolName))
+          return await desktop.run(call.toolName, args, approve, wrap);
+        if (SKILL_TOOLS.some(t => t.name === call.toolName))
+          return await runSkillTool(call.toolName, args, explicitSkills, wrap);
         if (WORKSPACE_TOOLS.some(t => t.name === call.toolName))
           return await fileAction(
             call.toolName,
@@ -1343,6 +1354,7 @@ export class RunManager {
       void count('runs.started');
       await this.#setStatus(record, 'running');
       let end: LoopEnd | undefined;
+      let desktop: DesktopSession | undefined;
       try {
         const model = await resolveModel(await starting);
         const settings = (await settingsStorage.get()) ?? DEFAULT_SETTINGS;
@@ -1356,9 +1368,28 @@ export class RunManager {
         const session = await this.#openSession(conversationId);
         record.tabs = session.tabIds();
         const workspaceSettings = await workspacePolicy();
+        const hasSkills = (await workspace.skills()).some(skill => skill.enabled);
+        const recent = hasSkills
+          ? (await activeBranch(conversationId)).findLast(
+              entry => entry.type === 'message' && entry.message.role === 'user' && !entry.appOwned,
+            )
+          : undefined;
+        const explicitSkills = namedSkills(
+          recent?.type === 'message'
+            ? recent.message.parts
+                .flatMap(part => (part.type === 'text' && !part.attached ? [part.text] : []))
+                .join('\n')
+            : '',
+        );
+        if (workspaceSettings.desktop && model.profile.vision) desktop = new DesktopSession(controller.signal);
         const tools = toolsForRun({
           vision: model.profile.vision,
-          agentTools: [...WORKSPACE_TOOLS, ...CONNECTOR_TOOLS],
+          agentTools: [
+            ...WORKSPACE_TOOLS,
+            ...CONNECTOR_TOOLS,
+            ...(hasSkills ? SKILL_TOOLS : []),
+            ...(desktop ? DESKTOP_TOOLS : []),
+          ],
         });
         const loop = new AgentLoop({
           conversationId,
@@ -1395,7 +1426,8 @@ export class RunManager {
               }
             : undefined,
           thumbnail,
-          agentTool: (call, signal) => this.#agentTool(conversationId, call, signal),
+          agentTool: (call, signal) => this.#agentTool(conversationId, call, signal, desktop, explicitSkills),
+          desktopPending: () => desktop?.pending ?? false,
           restore: restore ? { debt: restore.debt as DebtEntry[], guards: restore.guards } : undefined,
           takeSteering: () => {
             const queue = this.#queues.get(conversationId)?.splice(0) ?? [];
@@ -1428,6 +1460,7 @@ export class RunManager {
         record.outcome = 'failed';
         await this.#setStatus(record, 'failed', message);
       } finally {
+        desktop?.close();
         clearNotification('progress-' + conversationId);
         runEnded(record, end ?? {});
         // A run that finished well counts towards the card that asks for a store rating.

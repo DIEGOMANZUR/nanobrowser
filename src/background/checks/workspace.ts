@@ -2,12 +2,56 @@ import { fileAction, resolveWorkspaceUpload } from '@src/extension/workspace-act
 import { getEntries, getRun, listConversations } from '@src/store/conversations';
 import { nativeRequest } from '@src/store/native-workspace';
 import { createAgentSession } from '@src/extension/agent-session';
-import { DEFAULT_WORKSPACE_POLICY, WORKSPACE_POLICY_KEY, updateWorkspacePolicy } from '@src/store/workspace';
+import { DEFAULT_WORKSPACE_POLICY, WORKSPACE_POLICY_KEY, updateWorkspacePolicy, workspace } from '@src/store/workspace';
+import { toWorkspaceSkill } from '@src/store/skills';
 import { FIXTURE_ORIGIN } from '../fixtures-config';
 import { defineCheck } from './registry';
 import { layer } from '../layer';
 import { openTab } from '../tabs';
 import { openPanelTab, panel, scriptReplies, seedFixtureModel, waitForText } from './panel-chat';
+
+defineCheck({
+  name: 'workspace-skills',
+  title: 'Imported skill in the real agent tool path',
+  description: 'Invokes an enabled manual workflow and reads the skill instructions through a scripted model.',
+  async run() {
+    await seedFixtureModel();
+    const skill = toWorkspaceSkill(
+      '---\nname: workspace-fixture\ndescription: Workflow fixture.\ndisable-model-invocation: true\n---\nSynthetic workflow approval marker 715.',
+    );
+    await workspace.addSkill(skill);
+    await workspace.setSkillEnabled(skill.name, true);
+    const tab = await openPanelTab();
+    try {
+      const message = 'Use /workspace-fixture to read the example.';
+      await scriptReplies([
+        { toolCalls: [{ name: 'list_skills', input: {} }] },
+        { toolCalls: [{ name: 'read_skill', input: { name: skill.name } }] },
+        { text: 'I checked the active workspace skill.' },
+      ]);
+      await panel(tab.id!, 'type-send', { text: message });
+      await waitForText(tab.id!, 'I checked the active workspace skill.');
+      const [chat] = await listConversations(message);
+      const results =
+        chat && (await getEntries(chat.id)).flatMap(entry => (entry.type === 'message' ? entry.message.parts : []));
+      if (
+        !results?.some(
+          part =>
+            part.type === 'tool-result' &&
+            part.toolName === 'read_skill' &&
+            !part.isError &&
+            part.text.includes('approval marker 715'),
+        )
+      ) {
+        throw new Error('The enabled skill was not loaded by the agent.');
+      }
+      return { enabledManualSkillRead: true };
+    } finally {
+      await workspace.setSkillEnabled(skill.name, false);
+      await chrome.tabs.remove(tab.id!);
+    }
+  },
+});
 
 defineCheck({
   name: 'workspace-protected-actions',
