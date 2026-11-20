@@ -127,6 +127,11 @@ export function SkillsSection() {
               {skill.name}
             </label>
             <span className="break-words text-sm text-nb-fg/75">{skill.description}</span>
+            {skill.generated && (
+              <span className="text-sm">
+                Propuesta del agente{skill.enabled ? ' · habilitada' : ' · pendiente de activación'}
+              </span>
+            )}
             {skill.manual && (
               <span className="text-sm">
                 Escribe <code>/{skill.name}</code> en el mensaje para activarla.
@@ -134,6 +139,24 @@ export function SkillsSection() {
             )}
             <details className="text-sm">
               <summary>Ver instrucciones</summary>
+              <a
+                download="SKILL.md"
+                className="underline"
+                href={
+                  'data:text/markdown;charset=utf-8,' +
+                  encodeURIComponent(
+                    [
+                      '---',
+                      'name: ' + skill.name,
+                      'description: ' + JSON.stringify(skill.description),
+                      ...(skill.manual ? ['disable-model-invocation: true'] : []),
+                      '---',
+                      skill.instructions,
+                    ].join('\n'),
+                  )
+                }>
+                Exportar instrucciones como SKILL.md
+              </a>
               <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{skill.instructions}</pre>
             </details>
           </li>

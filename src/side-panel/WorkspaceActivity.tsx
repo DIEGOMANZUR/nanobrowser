@@ -86,6 +86,11 @@ const labels: Record<string, string> = {
   desktop_windows: 'Enumerar ventanas de Windows',
   desktop_snapshot: 'Capturar ventana de Windows',
   desktop_act: 'Enviar entrada a Windows',
+  propose_skill: 'Proponer habilidad',
+  search_workspace: 'Buscar archivos en subcarpetas',
+  archive_download: 'Archivar descarga del sitio',
+  recall_notes: 'Consultar memoria local',
+  remember_note: 'Guardar nota en Markdown',
 };
 
 const outcomes: Record<Step['state'], string> = {

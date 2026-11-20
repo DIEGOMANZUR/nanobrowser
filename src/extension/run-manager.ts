@@ -68,9 +68,11 @@ import type { Sink } from './journal';
 import { livePair, ModelUnavailable, resolveModel } from './models';
 import { count, deleteKeepingChoices, noteActivity, observe, runEnded, runModel, runStarted } from './analytics';
 import { endOf } from './analytics-payload';
-import { CONNECTOR_TOOLS, WORKSPACE_TOOLS } from '@src/agent/workspace-tools';
+import { ARCHIVE_TOOL, CONNECTOR_TOOLS, MEMORY_TOOLS, WORKSPACE_TOOLS } from '@src/agent/workspace-tools';
+import { PageDownloads } from './page-downloads';
+import { nativeRequest } from '@src/store/native-workspace';
 import { workspace, workspacePolicy, WORKSPACE_POLICY_KEY } from '@src/store/workspace';
-import { actionDecision, fileAction, resolveWorkspaceUpload } from './workspace-actions';
+import { actionDecision, fileAction, resolveWorkspaceUpload, workspaceResult } from './workspace-actions';
 import { connectorAction } from './connectors';
 import { DESKTOP_TOOLS } from '@src/agent/desktop-tools';
 import { SKILL_TOOLS } from '@src/agent/skill-tools';
@@ -1022,6 +1024,7 @@ export class RunManager {
     signal: AbortSignal,
     desktop: DesktopSession | undefined,
     explicitSkills: ReadonlySet<string>,
+    downloads: PageDownloads,
   ): Promise<{ text: string; isError: boolean; image?: CallOutcome['image'] }> {
     const args = (call.input ?? {}) as Record<string, unknown>;
     if (call.toolName !== 'save_file') {
@@ -1031,6 +1034,38 @@ export class RunManager {
       const approve = (title: string, detail: string, requestSignal: AbortSignal) =>
         this.#approveWorkspace(conversationId, title, detail, requestSignal);
       try {
+        if (call.toolName === ARCHIVE_TOOL.name)
+          return await downloads.archive(
+            args,
+            approve,
+            wrap,
+            signal,
+            () => (this.#modes.get(conversationId) ?? 'ask') === 'ask',
+          );
+        if (MEMORY_TOOLS.some(t => t.name === call.toolName)) {
+          if (!(await workspacePolicy()).memory) throw new Error('Local Markdown memory is turned off.');
+          const response =
+            call.toolName === 'remember_note'
+              ? await nativeRequest(
+                  {
+                    op: 'memory-write',
+                    scope: import.meta.env.WXT_AUTORUN_URL ? 'test' : 'personal',
+                    title: args.title,
+                    body: args.body,
+                  },
+                  signal,
+                )
+              : await nativeRequest(
+                  {
+                    op: 'memory-read',
+                    scope: import.meta.env.WXT_AUTORUN_URL ? 'test' : 'personal',
+                    query: args.query ?? '',
+                    offset: args.offset ?? 0,
+                  },
+                  signal,
+                );
+          return workspaceResult(response, wrap, 'personal Markdown memory');
+        }
         if (desktop && DESKTOP_TOOLS.some(t => t.name === call.toolName))
           return await desktop.run(call.toolName, args, approve, wrap);
         if (SKILL_TOOLS.some(t => t.name === call.toolName))
@@ -1368,6 +1403,8 @@ export class RunManager {
         const session = await this.#openSession(conversationId);
         record.tabs = session.tabIds();
         const workspaceSettings = await workspacePolicy();
+        const downloads = new PageDownloads();
+        const port = layerPort(session, this.border);
         const hasSkills = (await workspace.skills()).some(skill => skill.enabled);
         const recent = hasSkills
           ? (await activeBranch(conversationId)).findLast(
@@ -1387,7 +1424,9 @@ export class RunManager {
           agentTools: [
             ...WORKSPACE_TOOLS,
             ...CONNECTOR_TOOLS,
-            ...(hasSkills ? SKILL_TOOLS : []),
+            ARCHIVE_TOOL,
+            ...(workspaceSettings.memory ? MEMORY_TOOLS : []),
+            ...SKILL_TOOLS,
             ...(desktop ? DESKTOP_TOOLS : []),
           ],
         });
@@ -1403,7 +1442,13 @@ export class RunManager {
           }),
           tools,
           mode: () => this.#modes.get(conversationId) ?? conversation.mode,
-          layer: layerPort(session, this.border),
+          layer: {
+            ...port,
+            call: async (tool, input, signal) => {
+              const started = Date.now();
+              return downloads.observe(await port.call(tool, input, signal), started);
+            },
+          },
           host: this.#host(conversationId, session),
           signal: controller.signal,
           emit: event => this.emit(conversationId, event),
@@ -1426,7 +1471,8 @@ export class RunManager {
               }
             : undefined,
           thumbnail,
-          agentTool: (call, signal) => this.#agentTool(conversationId, call, signal, desktop, explicitSkills),
+          agentTool: (call, signal) =>
+            this.#agentTool(conversationId, call, signal, desktop, explicitSkills, downloads),
           desktopPending: () => desktop?.pending ?? false,
           restore: restore ? { debt: restore.debt as DebtEntry[], guards: restore.guards } : undefined,
           takeSteering: () => {
@@ -1451,6 +1497,32 @@ export class RunManager {
           await new RunWriter(conversationId, runId).appNote(STOPPED_NOTE);
         }
         await this.#setStatus(record, end.status, end.reason);
+        if ((await workspacePolicy()).memory && end.status === 'done' && !controller.signal.aborted) {
+          // Persist a minimal receipt, never raw chat, page content, file contents or credentials.
+          await nativeRequest(
+            {
+              op: 'memory-write',
+              scope: import.meta.env.WXT_AUTORUN_URL ? 'test' : 'personal',
+              title: 'Registro de tarea',
+              body:
+                'Conversación: ' +
+                conversationId +
+                '\nEjecución: ' +
+                runId +
+                '\nResultado: ' +
+                (end.outcome ?? end.status) +
+                '\nTurnos: ' +
+                record.turns,
+            },
+            controller.signal,
+          ).catch(() =>
+            this.#notice(
+              conversationId,
+              'La tarea terminó, pero el componente de Windows no pudo guardar el registro en la memoria local.',
+              'warn',
+            ),
+          );
+        }
         if (end.status !== 'stopped' && !(await this.#inView(conversationId))) {
           await notifyFinished(conversationId, end.outcome === 'success', (await this.scope.tabsOf(conversationId))[0]);
         }

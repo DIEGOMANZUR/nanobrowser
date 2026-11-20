@@ -5,6 +5,7 @@ import type { Connector, WorkspacePolicy } from '@src/store/workspace';
 import { GOOGLE_TOOL_GUIDE, googleCall, googleToken, isGoogleKind } from '@src/store/google-workspace';
 import { workspaceResult } from './workspace-actions';
 import type { Approve } from './workspace-actions';
+import { nativeRequest } from '@src/store/native-workspace';
 
 function sameConnection(live: Connector | undefined, original: Connector, tool?: string): live is Connector {
   return (
@@ -43,7 +44,26 @@ export async function connectorAction(
         name,
         tools: isGoogleKind(kind) ? tools.map(t => ({ name: t, arguments: GOOGLE_TOOL_GUIDE[t] })) : tools,
       }));
-    return workspaceResult(connectors, wrap, 'connected tools');
+    let installed: string[] = [];
+    let localCatalogue: 'available' | 'unavailable' = 'unavailable';
+    if (await chrome.permissions.contains({ permissions: ['nativeMessaging'] })) {
+      try {
+        installed = await nativeRequest<string[]>({ op: 'mcp-installed' }, signal);
+        localCatalogue = 'available';
+      } catch {
+        signal.throwIfAborted();
+      }
+    }
+    return workspaceResult(
+      {
+        enabled: connectors,
+        localCatalogue,
+        installedOnWindows: installed,
+        detail: 'Only explicitly enabled tools can be called.',
+      },
+      wrap,
+      'connected tools',
+    );
   }
   const id = typeof data.connectorId === 'string' ? data.connectorId : '';
   const name = typeof data.tool === 'string' ? data.tool : '';

@@ -35,17 +35,19 @@ export interface WorkspacePolicy {
   transfers: boolean;
   unlimited: boolean;
   desktop: boolean;
+  memory: boolean;
 }
 
 export const DEFAULT_WORKSPACE_POLICY: WorkspacePolicy = {
-  access: 'folders',
-  actions: 'chat',
+  access: import.meta.env.WXT_PERSONAL_WORKSPACE === '1' ? 'full' : 'folders',
+  actions: import.meta.env.WXT_PERSONAL_WORKSPACE === '1' ? 'send' : 'chat',
   browser: true,
   files: true,
   connectors: true,
   transfers: true,
   unlimited: false,
   desktop: false,
+  memory: import.meta.env.WXT_PERSONAL_WORKSPACE === '1',
 };
 
 export const WORKSPACE_POLICY_KEY = 'nb.workspacePolicy';
@@ -84,6 +86,7 @@ export interface WorkspaceSkill {
   references: { path: string; text: string }[];
   enabled: boolean;
   manual: boolean;
+  generated?: boolean;
 }
 
 let pending: ReturnType<typeof openDB<WorkspaceDb>> | undefined;

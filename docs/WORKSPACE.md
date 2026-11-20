@@ -1,5 +1,13 @@
 # Nanobrowser Workspace
 
+**Mi espacio**, en la cabecera del panel lateral, muestra el estado del componente de Windows, el alcance de archivos, las habilidades, la memoria y los conectores. **Comprobar conexión** ejecuta una comprobación de lectura del servicio seleccionado y muestra cuándo respondió.
+
+La compilación personal se genera con `$env:WXT_PERSONAL_WORKSPACE='1'` antes de `pnpm build`. Esta variante pide los permisos de mensajería nativa y descargas al cargar la extensión. Los perfiles nuevos empiezan con acceso de Windows completo, confirmación de envíos y memoria activada. Las preferencias que ya guardó el usuario siguen teniendo prioridad. La compilación normal mantiene los valores iniciales restringidos.
+
+El agente puede buscar archivos por nombre en subcarpetas. La búsqueda devuelve resultados parciales si alcanza el límite de trabajo y omite rutas inaccesibles o redirigidas. Puede archivar un archivo descargado por una acción de la tarea después de que Chrome confirme que terminó. Si no se indica destino, la compilación personal utiliza `%LOCALAPPDATA%\NanobrowserWorkspace\Downloads`. Se mantiene el archivo original.
+
+La memoria local vive en `%LOCALAPPDATA%\NanobrowserWorkspace\Memory`. Cada nota y cada registro mínimo de tarea completada ocupa un archivo Markdown nuevo. El agente puede proponer procedimientos reutilizables que aparecen en **Habilidades**. En **Carpetas y conectores → Descubrir servidores instalados** se enumeran los nombres registrados en `servers.json`. Selecciona las herramientas que autorizas antes del primer uso. [Referencias de diseño](REFERENCIAS.md)
+
 ## Abrir la extensión en Windows
 
 El proyecto usa Node.js 24.22.1 o superior y la versión de pnpm fijada en `package.json`. Desde la raíz del repositorio se compila y registra el componente con estos comandos.
@@ -33,6 +41,8 @@ En **Ajustes → Carpetas y conectores → Conectores**, selecciona el tipo, cre
 
 Para un conector local, copia `native/windows/servers.example.json` a `%LOCALAPPDATA%\NanobrowserWorkspace\NativeHost\servers.json` y configura el nombre, la ruta del ejecutable instalado, los argumentos y el directorio de trabajo. Los nombres de las variables de entorno dependen del servidor. Mantén los secretos en la copia local. Marca **Usar un servidor instalado en Windows** e introduce el nombre de la entrada.
 
+El catálogo también admite una sección `mcpServers` con `command` (ruta absoluta del ejecutable instalado), `args` (lista de argumentos), `cwd` y `env`. La extensión recibe solo los nombres registrados al descubrir servidores. **Ver herramientas compatibles** consulta el servidor que selecciones. Las propuestas de habilidades se pueden llevar a otra instalación desde **Ver instrucciones → Exportar instrucciones como SKILL.md**.
+
 Para habilitar el inicio de sesión de Google en Chrome, crea un cliente OAuth 2.0 (protocolo de autorización) de tipo extensión de Chrome para el identificador `nfndkliilhpjpfldeenildglgddpmdfi` y habilita las interfaces que vas a usar en tu proyecto de Google Cloud. Define `NANOBROWSER_GOOGLE_CLIENT_ID` al compilar. En esta variante puedes dejar el token manual vacío y Google solicitará los permisos seleccionados al guardar el conector.
 
 ## Sesiones largas y actividad
@@ -44,6 +54,8 @@ En **Permisos de acción**, activa **Sin límite fijo de pasos, con aviso cada 1
 - Cada fila del historial representa una operación y muestra la hora y el resultado conocido. El panel permite cambiar de tarea y consultar acciones anteriores.
 
 ## Habilidades
+
+La [receta para archivar un comprobante](../skills/archivar-comprobante/SKILL.md) reúne la búsqueda, el envío al portal, la comprobación de recepción y el guardado del archivo emitido por el sitio. Puedes importarla en la biblioteca.
 
 En **Ajustes → Habilidades**, pulsa **Importar SKILL.md** para un archivo suelto o **Importar carpeta** para un paquete. La carpeta debe tener `SKILL.md` en la raíz. Puedes incluir referencias de texto en `references/` o `assets/`. Revisa las instrucciones, pulsa **Guardar habilidad** y marca su casilla para habilitarla.
 

@@ -143,6 +143,8 @@ export function kindOf(tool: string, args: Record<string, unknown>): ToolKind {
       'list_connectors',
       'describe_connector',
       'list_skills',
+      'search_workspace',
+      'recall_notes',
       'read_skill',
       'desktop_windows',
     ].includes(tool)

@@ -28,6 +28,7 @@ export function WorkspaceSection() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const [windowsReady, setWindowsReady] = useState(false);
+  const [installedServers, setInstalledServers] = useState<string[]>([]);
   const [desktopReady, setDesktopReady] = useState(false);
   const [allowFull, setAllowFull] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -333,7 +334,60 @@ export function WorkspaceSection() {
         )}
       </SettingsCard>
 
+      <SettingsCard title="Memoria en Markdown" className="flex flex-col gap-3">
+        <label>
+          <input
+            type="checkbox"
+            checked={policy.memory}
+            disabled={busy || !loaded || (!windowsReady && !policy.memory)}
+            onChange={event => {
+              const memory = event.target.checked;
+              void perform(() => change({ memory }));
+            }}
+          />{' '}
+          Guardar registros y notas reutilizables en este equipo
+        </label>
+        <p className="text-sm text-nb-fg/70">
+          Cada nota se crea en un archivo nuevo dentro de la carpeta local NanobrowserWorkspace\\Memory. El agente puede
+          buscarla en tareas posteriores.
+        </p>
+      </SettingsCard>
       <SettingsCard title="Conectores" className="flex flex-col gap-4">
+        {windowsReady && (
+          <div className="space-y-2">
+            <button
+              type="button"
+              className={button}
+              disabled={busy}
+              onClick={() =>
+                void perform(async () => {
+                  const names = await nativeRequest<string[]>({ op: 'mcp-installed' });
+                  setInstalledServers(names);
+                  setStatus(
+                    names.length
+                      ? 'Selecciona un servidor para consultar sus herramientas.'
+                      : 'El catálogo local servers.json todavía no tiene servidores registrados.',
+                  );
+                })
+              }>
+              Descubrir servidores instalados
+            </button>
+            <div className="flex flex-wrap gap-2">
+              {installedServers.map(name => (
+                <button
+                  className={button}
+                  type="button"
+                  key={name}
+                  onClick={() => {
+                    const existing = connectors.find(service => service.local && service.endpoint === name);
+                    editConnector(existing ?? { ...blank, local: true, name, endpoint: name, kind: 'mcp' });
+                  }}>
+                  {name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <ul className="divide-y divide-nb-border">
           {connectors.map(service => (
             <li key={service.id} className="flex flex-wrap items-center gap-2 py-2 text-sm">

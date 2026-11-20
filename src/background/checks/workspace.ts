@@ -2,13 +2,87 @@ import { fileAction, resolveWorkspaceUpload } from '@src/extension/workspace-act
 import { getEntries, getRun, listConversations } from '@src/store/conversations';
 import { nativeRequest } from '@src/store/native-workspace';
 import { createAgentSession } from '@src/extension/agent-session';
+import { PageDownloads } from '@src/extension/page-downloads';
 import { DEFAULT_WORKSPACE_POLICY, WORKSPACE_POLICY_KEY, updateWorkspacePolicy, workspace } from '@src/store/workspace';
 import { toWorkspaceSkill } from '@src/store/skills';
 import { FIXTURE_ORIGIN } from '../fixtures-config';
-import { defineCheck } from './registry';
+import { defineCheck as registerCheck } from './registry';
 import { layer } from '../layer';
 import { openTab } from '../tabs';
 import { openPanelTab, panel, scriptReplies, seedFixtureModel, waitForText } from './panel-chat';
+
+// These checks change policies and create fixture files. Only an isolated autorun build may register them.
+const defineCheck: typeof registerCheck = check => {
+  if (import.meta.env.WXT_AUTORUN_URL) registerCheck(check);
+};
+
+defineCheck({
+  name: 'workspace-learning',
+  title: 'Personal memory and skill drafts',
+  description: 'Creates a draft, verifies opt-in and recalls persistent Markdown from a separate task.',
+  async run() {
+    const previous = await chrome.storage.local.get(WORKSPACE_POLICY_KEY);
+    const marker = crypto.randomUUID();
+    const name = 'learned-' + marker;
+    const tab = await openPanelTab();
+    try {
+      await seedFixtureModel();
+      await updateWorkspacePolicy({ ...DEFAULT_WORKSPACE_POLICY, memory: true });
+      await scriptReplies([
+        {
+          toolCalls: [
+            {
+              name: 'propose_skill',
+              input: {
+                name,
+                description: 'Synthetic reusable task.',
+                instructions: 'Read the fixture, then verify its receipt.',
+              },
+            },
+          ],
+        },
+        { toolCalls: [{ name: 'remember_note', input: { title: 'Synthetic test', body: marker } }] },
+        { text: 'Workflow and note recorded.' },
+      ]);
+      await panel(tab.id!, 'type-send', { text: 'Prepare the workflow and record the synthetic note.' });
+      await waitForText(tab.id!, 'Workflow and note recorded.', 25000);
+      const draft = await workspace.skill(name);
+      if (!draft?.generated || draft.enabled) throw new Error('The generated skill must be an inactive draft.');
+      const other = await openPanelTab();
+      try {
+        await scriptReplies([
+          { toolCalls: [{ name: 'recall_notes', input: { query: marker } }] },
+          { text: 'Completed memory lookup.' },
+        ]);
+        const question = 'Look up this fixture note ' + marker;
+        await panel(other.id!, 'type-send', { text: question });
+        await waitForText(other.id!, 'Completed memory lookup.', 25000);
+        const [chat] = await listConversations(question.slice(0, 35));
+        const parts = (await getEntries(chat.id)).flatMap(entry =>
+          entry.type === 'message' ? entry.message.parts : [],
+        );
+        if (
+          !parts.some(
+            p =>
+              p.type === 'tool-result' &&
+              p.toolName === 'recall_notes' &&
+              !p.isError &&
+              p.text.includes(marker) &&
+              p.text.includes('.md'),
+          )
+        )
+          throw new Error('The new task did not recover the Markdown memory.');
+      } finally {
+        await chrome.tabs.remove(other.id!);
+      }
+      return { draftCreated: true, optInPreserved: true, markdownRecoveredInNewTask: true };
+    } finally {
+      await chrome.tabs.remove(tab.id!);
+      if (WORKSPACE_POLICY_KEY in previous) await chrome.storage.local.set(previous);
+      else await chrome.storage.local.remove(WORKSPACE_POLICY_KEY);
+    }
+  },
+});
 
 defineCheck({
   name: 'workspace-skills',
@@ -182,6 +256,10 @@ defineCheck({
       const written = JSON.parse(copied.text.split('\n').at(-1) ?? '{}') as { path?: string };
       if (!written.path?.startsWith(directory + '\\Enviados\\') || !(await read(written.path)).text.includes(original))
         throw new Error('The copy is missing or differs.');
+      const found = await fileAction('search_workspace', { ...input, query: 'copia' }, approval, wrap, signal);
+      const matches = JSON.parse(found.text) as { entries: { path: string }[] };
+      if (!matches.entries.some(item => item.path === written.path))
+        throw new Error('Recursive search missed a nested file.');
       const attachments = [await resolveWorkspaceUpload('workspace:windows:' + source, approval, signal)];
       const { controller } = await layer();
       const session = controller.createSession({ capabilities: ['files'], confirm: 'never' });
@@ -193,11 +271,58 @@ defineCheck({
         if (!ref) throw new Error('The fixture file input was missing.');
         const upload = await session.call('upload', { tabId: tab.id!, target: { ref }, attachments });
         if (!upload.ok || upload.receipt?.postcondition?.status !== 'met') throw new Error(upload.text);
+        const tracker = new PageDownloads();
+        const start = Date.now();
+        const click = await session.call('click', {
+          tabId: tab.id!,
+          target: { role: 'link', name: 'Download receipt' },
+        });
+        const observed = tracker.observe(click, start);
+        const downloadRef = /downloadRef ([a-f0-9-]{36})/.exec(observed.text)?.[1];
+        if (!downloadRef) throw new Error('Missing page download receipt: ' + observed.text.slice(0, 300));
+        const archived = await tracker.archive(
+          { downloadRef, folderId: 'windows', path: directory + '\\Comprobantes\\recibido.txt' },
+          approval,
+          wrap,
+          signal,
+          () => false,
+        );
+        const archivedPath = JSON.parse(archived.text.split('\n').at(-1)!).path;
+        if (!(await read(archivedPath)).text.includes('A file the fixture server sent: workspace-site-receipt.txt'))
+          throw new Error('Archived download did not contain the server bytes.');
+        const automatic = await tracker.archive({ downloadRef }, approval, wrap, signal, () => false);
+        const automaticPath = JSON.parse(automatic.text.split('\n').at(-1)!).path;
+        if (
+          !automaticPath.includes('\\NanobrowserWorkspace\\TestRuns\\Downloads\\') ||
+          !(await read(automaticPath)).text.includes('A file the fixture server sent: workspace-site-receipt.txt')
+        )
+          throw new Error('Automatic download filing did not retain the server bytes.');
+        const submitted = await session.call('click', {
+          tabId: tab.id!,
+          target: { role: 'button', name: 'Send document' },
+        });
+        if (!submitted.ok) throw new Error(submitted.text);
+        const received = (await (await fetch(FIXTURE_ORIGIN + '/__requests')).json()) as {
+          posts: { body: string; at: string }[];
+        };
+        if (
+          !received.posts.some(
+            post =>
+              Date.parse(post.at) >= start &&
+              post.body.includes('filename="original.txt"') &&
+              post.body.includes(original),
+          )
+        )
+          throw new Error('The portal did not receive the original file bytes.');
         return {
           windows: hello.version,
           deniedPath: denied,
           originalPreserved: true,
           copyVerified: true,
+          recursiveSearch: true,
+          portalReceivedOriginal: true,
+          downloadedBytesVerifiedAtDestination: true,
+          automaticDestinationVerified: true,
           upload: upload.receipt.postcondition,
         };
       } finally {

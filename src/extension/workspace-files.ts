@@ -94,6 +94,47 @@ export async function readFileText(args: Record<string, unknown>, signal: AbortS
   return readText(file, args.offset);
 }
 
+export async function searchFiles(args: Record<string, unknown>, signal: AbortSignal) {
+  const parts = pathParts(args.path, true);
+  const start = await directory(await root(args.folderId, 'read'), parts, signal);
+  const queue = [{ folder: start, path: parts.join('/') }];
+  const query = String(args.query).toLocaleLowerCase();
+  const offset = offsetOf(args.offset);
+  const deadline = performance.now() + 8000;
+  let matched = 0;
+  let scanned = 0;
+  let skipped = 0;
+  const entries = [];
+  for (let i = 0; i < queue.length; i++) {
+    const current = queue[i];
+    try {
+      for await (const entry of current.folder.values()) {
+        signal.throwIfAborted();
+        if (++scanned > 100000 || performance.now() > deadline) return { entries, limited: true, scanned, skipped };
+        const path = current.path ? current.path + '/' + entry.name : entry.name;
+        try {
+          pathParts(path, false);
+        } catch {
+          skipped++;
+          continue;
+        }
+        if (entry.kind === 'directory') {
+          queue.push({ folder: entry as WorkspaceDirectory, path });
+          continue;
+        }
+        if (!entry.name.toLocaleLowerCase().includes(query) || matched++ < offset) continue;
+        if (entries.length === 8) return { entries, nextOffset: matched - 1, scanned, skipped };
+        entries.push({ kind: 'file', path, uploadId: 'workspace:' + String(args.folderId) + ':' + path });
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!(error instanceof DOMException)) throw error;
+      skipped++;
+    }
+  }
+  return { entries, scanned, skipped };
+}
+
 export async function readText(file: File, start: unknown) {
   const kind = attachmentKind(file.name, file.type);
   if (!('kind' in kind) || kind.kind !== 'text') throw new Error('This tool reads text files only.');

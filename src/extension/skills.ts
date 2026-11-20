@@ -1,5 +1,6 @@
 import type { ContentSource } from '@src/browser-control';
 import { workspace } from '@src/store/workspace';
+import { toWorkspaceSkill } from '@src/store/skills';
 
 export async function runSkillTool(
   tool: string,
@@ -7,6 +8,27 @@ export async function runSkillTool(
   explicit: ReadonlySet<string>,
   wrap: (text: string, source: ContentSource) => string,
 ) {
+  if (tool === 'propose_skill') {
+    const { name, description, instructions } = args;
+    if (
+      typeof name !== 'string' ||
+      !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) ||
+      typeof description !== 'string' ||
+      !description.trim() ||
+      description.length > 1024 ||
+      typeof instructions !== 'string' ||
+      instructions.length > 12000
+    )
+      throw new Error('Provide a valid skill name, a short description and bounded instructions.');
+    const skill = toWorkspaceSkill(
+      ['---', 'name: ' + name, 'description: ' + JSON.stringify(description), '---', instructions].join('\n'),
+    );
+    await workspace.addSkill({ ...skill, generated: true });
+    return {
+      text: 'Borrador de habilidad guardado. Disponible en Ajustes → Habilidades para revisión y activación.',
+      isError: false,
+    };
+  }
   const allowed = (await workspace.skills()).filter(
     skill => skill.enabled && (!skill.manual || explicit.has(skill.name)),
   );

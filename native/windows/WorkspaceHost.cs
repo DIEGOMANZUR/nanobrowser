@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Diagnostics;
@@ -11,6 +12,8 @@ using Microsoft.Win32.SafeHandles;
 
 internal static class WorkspaceHost
 {
+    private static readonly string WorkspaceDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NanobrowserWorkspace");
+    private static readonly string MemoryDirectory = Path.Combine(WorkspaceDirectory, "Memory");
     private const int Chunk = 384 * 1024;
     private const int FileLimit = 25 * 1024 * 1024;
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
@@ -66,6 +69,11 @@ internal static class WorkspaceHost
             case "hello": return new { version = 1, desktop = true };
             case "roots": return Roots();
             case "list": return Browse(PathArg(request), StringArg(request, "query"), NumberArg(request, "offset"));
+            case "search": return Search(PathArg(request), RequiredString(request, "query"), NumberArg(request, "offset"));
+            case "memory-write": return WriteNote(NotesDirectory(request), RequiredString(request, "title"), RequiredString(request, "body"));
+            case "memory-read": return ReadNotes(NotesDirectory(request), StringArg(request, "query"), NumberArg(request, "offset"));
+            case "mcp-installed": return InstalledServers();
+            case "workspace-locations": return new { memory = NotesDirectory(request), downloads = Path.Combine(Path.GetDirectoryName(NotesDirectory(request)), "Downloads") };
             case "chunk": return ReadChunk(PathArg(request), NumberArg(request, "offset"));
             case "save": return Save(PathArg(request), RequiredString(request, "content"));
             case "copy": return Copy(PathArg(request, "source"), PathArg(request));
@@ -116,22 +124,28 @@ internal static class WorkspaceHost
         if (server == null)
         {
             if (method != "initialize") throw new InvalidOperationException("Open the connector first.");
-            var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "servers.json");
-            if (!File.Exists(configPath)) throw new FileNotFoundException("Configure servers.json beside the Windows companion first.");
-            var config = Json.Deserialize<Dictionary<string, Dictionary<string, object>>>(File.ReadAllText(configPath));
-            Dictionary<string, object> entry;
-            if (!config.TryGetValue(id, out entry)) throw new ArgumentException("No installed local connector has that name.");
-            var executable = PathArg(entry, "executable");
+            var config = ServerCatalogue();
+            object raw;
+            if (!config.TryGetValue(id, out raw) || !(raw is Dictionary<string, object>)) throw new ArgumentException("No installed local connector has that name.");
+            var entry = (Dictionary<string, object>)raw;
+            var executable = PathArg(entry, entry.ContainsKey("executable") ? "executable" : "command");
             if (!executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Configure an absolute executable path ending in .exe.");
-            var start = new ProcessStartInfo(executable, StringArg(entry, "arguments")) {
+            var arguments = StringArg(entry, "arguments");
+            object argv;
+            if (entry.TryGetValue("args", out argv)) {
+                var array = argv as System.Collections.IList;
+                if (array == null || array.Count > 64 || array.Cast<object>().Any(value => !(value is string))) throw new ArgumentException("Use an array of string arguments.");
+                arguments = String.Join(" ", array.Cast<string>().Select(QuoteProcessArgument));
+            }
+            var start = new ProcessStartInfo(executable, arguments) {
                 UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true,
                 RedirectStandardError = true, CreateNoWindow = true,
                 StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
             };
-            var cwd = StringArg(entry, "workingDirectory");
-            if (!String.IsNullOrEmpty(cwd)) start.WorkingDirectory = PathArg(entry, "workingDirectory");
+            var cwdKey = entry.ContainsKey("workingDirectory") ? "workingDirectory" : "cwd";
+            if (!String.IsNullOrEmpty(StringArg(entry, cwdKey))) start.WorkingDirectory = PathArg(entry, cwdKey);
             object variables;
-            if (entry.TryGetValue("environment", out variables)) {
+            if (entry.TryGetValue("environment", out variables) || entry.TryGetValue("env", out variables)) {
                 var map = variables as Dictionary<string, object>;
                 if (map != null) foreach (var item in map) if (item.Value is string) start.EnvironmentVariables[item.Key] = (string)item.Value;
             }
@@ -296,6 +310,120 @@ internal static class WorkspaceHost
                 return new { name = Path.GetFileName(path), size = stream.Length, data = Convert.ToBase64String(bytes), modified = File.GetLastWriteTimeUtc(path).Ticks.ToString() };
             }
         }
+    }
+
+    private static object Search(string root, string query, int offset)
+    {
+        if (String.IsNullOrWhiteSpace(query) || query.Length > 200) throw new ArgumentException("Supply a filename or a substring.");
+        CheckWorkspacePath(root);
+        var entries = new List<object>();
+        var queue = new Queue<string>();
+        queue.Enqueue(root);
+        var matched = 0;
+        var skipped = 0;
+        var scanned = 0;
+        var deadline = Stopwatch.StartNew();
+        while (queue.Count > 0)
+        {
+            var directory = queue.Dequeue();
+            try
+            {
+                CheckWorkspacePath(directory);
+                foreach (var item in new DirectoryInfo(directory).EnumerateFileSystemInfos())
+                {
+                    if (++scanned > 100000 || deadline.ElapsedMilliseconds > 8000) return new { entries, limited = true, scanned, skipped };
+                    if (WithinHost(item.FullName, HostDirectory)) { skipped++; continue; }
+                    if ((item.Attributes & FileAttributes.ReparsePoint) != 0) {
+                        // OneDrive placeholders can retain their direct path. Reject redirected junctions and links.
+                        try { CheckWorkspacePath(item.FullName); }
+                        catch (UnauthorizedAccessException) { skipped++; continue; }
+                        catch (IOException) { skipped++; continue; }
+                        catch (Win32Exception) { skipped++; continue; }
+                    }
+                    if (item is DirectoryInfo) { queue.Enqueue(item.FullName); continue; }
+                    if (item.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (matched++ < offset) continue;
+                    if (entries.Count == 8) return new { entries, nextOffset = matched - 1, scanned, skipped };
+                    entries.Add(new { kind = "file", path = item.FullName, size = ((FileInfo)item).Length, modified = item.LastWriteTimeUtc.ToString("o") });
+                }
+            }
+            catch (UnauthorizedAccessException) { skipped++; }
+            catch (IOException) { skipped++; }
+            catch (Win32Exception) { skipped++; }
+        }
+        return new { entries, limited = false, scanned, skipped };
+    }
+
+    private static string NotesDirectory(Dictionary<string, object> request)
+    {
+        return StringArg(request, "scope") == "test" ? Path.Combine(WorkspaceDirectory, "TestRuns", "Memory") : MemoryDirectory;
+    }
+
+    private static object WriteNote(string directory, string title, string body)
+    {
+        if (String.IsNullOrWhiteSpace(title) || title.Length > 120 || title.Any(Char.IsControl) || String.IsNullOrWhiteSpace(body) || body.Length > 5000)
+            throw new ArgumentException("Use a short title and a memory note of 1–5000 characters.");
+        var now = DateTime.UtcNow;
+        var name = now.ToString("yyyyMMddTHHmmssfffZ") + "-" + Guid.NewGuid().ToString("N") + ".md";
+        return Save(Path.Combine(directory, name), "# " + title + "\n\n" + now.ToString("o") + "\n\n" + body + "\n");
+    }
+
+    private static object ReadNotes(string directory, string query, int offset)
+    {
+        var notes = new List<object>();
+        if (!Directory.Exists(directory)) return new { notes };
+        CheckWorkspacePath(directory);
+        var matched = 0;
+        var scanned = 0;
+        var timer = Stopwatch.StartNew();
+        var files = new DirectoryInfo(directory).EnumerateFiles("*.md").Take(5001).ToList();
+        foreach (var entry in files.OrderByDescending(item => item.Name, StringComparer.Ordinal))
+        {
+            if (++scanned > 5000 || timer.ElapsedMilliseconds > 6000) return new { notes, limited = true };
+            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0 || entry.Length > 24000) continue;
+            using (var stream = new FileStream(entry.FullName, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var reader = new StreamReader(stream, Encoding.UTF8))
+            {
+                CheckOpenedPath(stream.SafeFileHandle, entry.FullName);
+                var content = reader.ReadToEnd();
+                if (content.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                if (matched++ < offset) continue;
+                if (notes.Count == 1) return new { notes, nextOffset = matched - 1 };
+                notes.Add(new { name = entry.Name, content });
+            }
+        }
+        return new { notes, limited = files.Count > 5000 };
+    }
+
+    private static string QuoteProcessArgument(string argument)
+    {
+        if (argument.IndexOf('\0') >= 0) throw new ArgumentException("Invalid process argument.");
+        var output = new StringBuilder("\"");
+        var slashes = 0;
+        foreach (var c in argument) {
+            if (c == '\\') { slashes++; continue; }
+            if (c == '"') output.Append('\\', slashes * 2 + 1);
+            else output.Append('\\', slashes);
+            output.Append(c); slashes = 0;
+        }
+        return output.Append('\\', slashes * 2).Append('"').ToString();
+    }
+
+    private static Dictionary<string, object> ServerCatalogue()
+    {
+        var path = Path.Combine(HostDirectory, "servers.json");
+        if (!File.Exists(path)) return new Dictionary<string, object>();
+        if (new FileInfo(path).Length > 524288) throw new IOException("The local server catalogue is too large.");
+        var config = Json.Deserialize<Dictionary<string, object>>(File.ReadAllText(path));
+        object nested;
+        if (config == null) throw new IOException("Invalid local server catalogue.");
+        if (config.TryGetValue("mcpServers", out nested)) return nested as Dictionary<string, object> ?? new Dictionary<string, object>();
+        return config;
+    }
+
+    private static string[] InstalledServers()
+    {
+        return ServerCatalogue().Keys.Where(id => Regex.IsMatch(id, @"^[A-Za-z0-9_-]{1,64}$")).OrderBy(id => id, StringComparer.Ordinal).Take(200).ToArray();
     }
 
     private static object Save(string path, string content)

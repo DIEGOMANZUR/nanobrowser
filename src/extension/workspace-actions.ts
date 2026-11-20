@@ -5,6 +5,7 @@ import type { WorkspacePolicy } from '@src/store/workspace';
 import { nativeFile, nativeRequest, nativeUpload } from '@src/store/native-workspace';
 import {
   browseFiles,
+  searchFiles,
   copyWorkspaceFile,
   readFileText,
   readText,
@@ -127,10 +128,13 @@ export async function fileAction(
     if (writing && !needsApproval && asksForFile(await workspacePolicy()))
       throw new Error('The user changed file creation approvals.');
     signal.throwIfAborted();
-    if (tool === 'browse_workspace') {
-      if (!windows) return browseFiles(args, signal);
+    if (tool === 'browse_workspace' || tool === 'search_workspace') {
+      const search = tool === 'search_workspace';
+      if (search && (typeof args.query !== 'string' || !args.query.trim() || args.query.length > 200))
+        throw new Error('Supply a filename or part of a filename.');
+      if (!windows) return search ? searchFiles(args, signal) : browseFiles(args, signal);
       const result = await nativeRequest<{ entries: { path: string; kind: string }[] }>(
-        { op: 'list', path, query: args.query, offset: args.offset },
+        { op: search ? 'search' : 'list', path, query: args.query, offset: args.offset },
         signal,
       );
       return {

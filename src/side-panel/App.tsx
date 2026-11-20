@@ -33,6 +33,7 @@ import type { SavedShortcut } from '@src/store/shortcuts';
 import { useShortcuts } from '@src/ui/shortcuts';
 import { AutoNotice } from '@src/ui/auto-notice';
 import { HistoryIcon, LogoMark, NewChatIcon, SettingsIcon } from '@src/ui/icons';
+import { WorkspaceOverview } from './WorkspaceOverview';
 import { websiteUrl } from '@src/ui/links';
 
 const NO_PROVIDERS: ProviderConfig[] = [];
@@ -374,6 +375,7 @@ export function App() {
         </a>
         {/* The title is for screen readers only; the header shows the mark and three buttons. */}
         <h1 className="sr-only">{conversation?.title || t('panel.newChat')}</h1>
+        <WorkspaceOverview />
         <span className="flex-1" />
         <IconButton label={t('panel.newChat')} onClick={() => newChat(confirmNewChat)}>
           <NewChatIcon />

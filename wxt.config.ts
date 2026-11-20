@@ -12,6 +12,9 @@ import { permissionLists } from './src/ui/manifest-permissions';
 const autorun = !!process.env.WXT_AUTORUN_URL;
 const productPermissions = !autorun || !!process.env.WXT_PRODUCT_PERMISSIONS;
 const googleClientId = process.env.NANOBROWSER_GOOGLE_CLIENT_ID?.trim();
+const personal = process.env.WXT_PERSONAL_WORKSPACE === '1';
+const base = permissionLists(productPermissions ? 'product' : 'autorun');
+const nativeRequired = personal || !productPermissions;
 
 export default defineConfig({
   imports: false,
@@ -29,17 +32,20 @@ export default defineConfig({
     default_locale: 'en',
     minimum_chrome_version: '125',
     host_permissions: ['<all_urls>'],
-    ...permissionLists(productPermissions ? 'product' : 'autorun'),
-    ...(productPermissions
-      ? { optional_permissions: [...permissionLists('product').optional_permissions, 'nativeMessaging' as const] }
-      : { permissions: [...permissionLists('autorun').permissions, 'nativeMessaging' as const] }),
+    permissions: [
+      ...new Set([
+        ...base.permissions,
+        ...(nativeRequired ? ['nativeMessaging' as const] : []),
+        ...(personal ? ['downloads' as const] : []),
+        ...(googleClientId ? ['identity' as const] : []),
+      ]),
+    ],
+    optional_permissions: [
+      ...base.optional_permissions.filter(permission => !personal || permission !== 'downloads'),
+      ...(!nativeRequired ? ['nativeMessaging' as const] : []),
+    ],
     ...(googleClientId && {
       oauth2: { client_id: googleClientId, scopes: ['https://www.googleapis.com/auth/userinfo.email'] },
-      permissions: [
-        ...permissionLists(productPermissions ? 'product' : 'autorun').permissions,
-        'identity' as const,
-        ...(!productPermissions ? ['nativeMessaging' as const] : []),
-      ],
     }),
     action: { default_icon: 'icon-32.png', default_title: '__MSG_actionTitle__' },
     icons: { 128: 'icon-128.png' },

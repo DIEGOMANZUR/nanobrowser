@@ -2,6 +2,19 @@ import type { AgentTool } from './tools';
 
 export const SKILL_TOOLS: AgentTool[] = [
   {
+    name: 'propose_skill',
+    source: 'agent',
+    group: 'working',
+    description:
+      'Draft a new reusable skill after a verified repeatable workflow. It appears in Settings → Habilidades for the user to enable. Existing skills are preserved.',
+    parameters: {
+      type: 'object',
+      properties: { name: { type: 'string' }, description: { type: 'string' }, instructions: { type: 'string' } },
+      required: ['name', 'description', 'instructions'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'list_skills',
     source: 'agent',
     group: 'working',
